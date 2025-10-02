@@ -1,0 +1,75 @@
+# --- Project-specific ---
+# Do not track notebooks anywhere
+*.ipynb
+.ipynb_checkpoints/
+*.yaml
+
+# Folders to exclude
+/_aux/
+/notebooks/
+/run/
+
+# --- Python caches & bytecode ---
+__pycache__/
+__pylanche__/        # as requested (typo-safe alongside __pycache__)
+*.py[cod]
+*$py.class
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.pyre/
+.hypothesis/
+.dmypy.json
+
+# --- Build / packaging ---
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+wheels/
+pip-wheel-metadata/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# --- Test / coverage reports ---
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+nosetests.xml
+*.cover
+*.py,cover
+htmlcov/
+
+# --- Logs & outputs ---
+*.log
+*.out
+*.err
+logs/
+log/
+
+# --- IDE / editor settings ---
+.vscode/
+.idea/
+*.code-workspace
+
+# --- OS-specific ---
+.DS_Store
+Thumbs.db
+
+# --- Optional common extras ---
+# If the repo has any JS tooling, keep node modules out:
+node_modules/

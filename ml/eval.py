@@ -79,7 +79,11 @@ corruptor = Corruptor(**corruptor_parameters.to_dict())
 
 n_samples = config.eval.n_samples
 reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict())
-backward_solver = SDESolver(reverse_sde, EulerMaruyama())
+# error here : pull intergrator from config
+integrator_name = config.reverse.integrator_cls
+integrator_parameters = config.reverse.integrator_params
+integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+backward_solver = SDESolver(reverse_sde, integrator)
 x0 = standard_normal_BCHW(n_samples, dataset.C, dataset.H, dataset.W, device=config.generic.device)
 n_steps = config.eval.n_steps
 print(f"-------> simulating backward trajectories {n_samples} samples with {n_steps} steps", flush=True)

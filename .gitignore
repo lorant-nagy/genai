@@ -8,6 +8,8 @@
 /_aux/
 /notebooks/
 /run/
+/TEMP/data/
+
 
 # --- Python caches & bytecode ---
 __pycache__/

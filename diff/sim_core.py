@@ -97,7 +97,7 @@ class SDESolver:
 
         # Simulate
         x = x0.clone()
-        with torch.inference_mode():
+        with torch.no_grad():
             for k in range(n_steps):
                 t = float(t_grid[k])
                 dW = torch.randn(x.shape, device=self.device, generator=rng, dtype=x.dtype) * sqrt_dt

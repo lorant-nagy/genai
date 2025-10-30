@@ -6,9 +6,9 @@
 
 # Folders to exclude
 /_aux/
-/notebooks/
-/run/
-/TEMP/data/
+notebooks/
+run/
+TEMP/
 
 
 # --- Python caches & bytecode ---

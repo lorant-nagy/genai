@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import torch
 
 
-def make_reverse(base_process, score_model, T: float, constant_sigma: bool = True, include_div_a: bool = False):
+def make_reverse(base_process, score_model, T: float, constant_sigma: bool = True, include_div_a: bool = False, CHW: tuple = None):
     """
     Build the reverse-time SDE Z_τ = X_{T-τ} as a process that runs forward in τ ∈ [0, T].
 
@@ -44,7 +44,10 @@ def make_reverse(base_process, score_model, T: float, constant_sigma: bool = Tru
             g = self.base.diffusion(z, t)
             a = g * g    # using that σ is x-independent
             t_broad = torch.full((z.shape[0],), t, device=z.device, dtype=z.dtype)
-            return - f + a * self.score_model(z, t_broad)
+            z_bchw = z.view(z.shape[0], *CHW)
+            score = self.score_model(z_bchw, t_broad)
+            score_flat = score.view(z.shape[0], -1)
+            return - f + a * score_flat
 
         def diffusion(self, z, tau):
             # σ, time-flipped

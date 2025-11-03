@@ -12,6 +12,7 @@ from diff.reverse import make_reverse
 from diff.integrator import EulerMaruyama
 
 from utils.samplers import standard_normal_BCHW
+from utils.samplers import standard_normal_flat
 
 from utils.eval_plotting import plot_corruption_and_samples
 
@@ -77,11 +78,12 @@ corruptor_parameters.process = proc
 corruptor_parameters.mode = "trajectory"
 corruptor = Corruptor(**corruptor_parameters.to_dict())
 
+CHW = (dataset.C, dataset.H, dataset.W)
+
 n_samples = config.eval.n_samples
-reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict())
-# error here : pull intergrator from config
-integrator_name = config.reverse.integrator_cls
-integrator_parameters = config.reverse.integrator_params
+reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+integrator_name = config.corruption.integrator_cls
+integrator_parameters = config.corruption.integrator_params
 integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
 backward_solver = SDESolver(reverse_sde, integrator)
 x0 = standard_normal_BCHW(n_samples, dataset.C, dataset.H, dataset.W, device=config.generic.device)
@@ -95,6 +97,7 @@ with torch.inference_mode():
             )
 
 print(f"-------> plotting", flush=True)
+X_img = X.view(X.shape[0], X.shape[1], dataset.C, dataset.H, dataset.W)
 plot_corruption_and_samples(
     corruptor=corruptor,
     batch_of_data=batch_of_data,
@@ -106,6 +109,6 @@ plot_corruption_and_samples(
     mark_t0_indices=True,
     label_data_sample_indices=True,
     t_grid=t_grid,
-    X=X[:, :9],
+    X=X_img[:, :9],
     n_time_cols=10,
 )

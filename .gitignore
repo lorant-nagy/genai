@@ -9,6 +9,7 @@
 notebooks/
 run/
 TEMP/
+DATA/
 
 
 # --- Python caches & bytecode ---

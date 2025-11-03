@@ -8,6 +8,9 @@ import torch
 def standard_normal_BCHW(batch_size: int, channels: int, height: int, width: int, device: str = "cpu") -> torch.Tensor:
     return torch.randn((batch_size, channels, height, width), device=device, dtype=torch.get_default_dtype())
 
+def standard_normal_flat(batch_size: int, channels: int, height: int, width: int, device: str = "cpu") -> torch.Tensor:
+    return torch.randn((batch_size, channels * height * width), device=device, dtype=torch.get_default_dtype())
+
 def generate_random_side_rectangles(dim = None, num_rectangles=1, revert_color = True, always_center = False, fixed_width_and_height_perc = None):
     """
     Generate random rectangles with constraints based on distance to nearest sides.

@@ -72,7 +72,9 @@ class SDESolver:
         """
         # Move x0 to device and enforce flat [B, d] shape
         x0 = x0.to(self.device)
-        assert x0.ndim == 2, f"x0 must be (B, d); got {tuple(x0.shape)}"
+        # flatten if needed
+        if x0.ndim == 4:
+            x0 = x0.view(x0.shape[0], -1)
         B, d = x0.shape
         assert d == int(self.process.dim), (
             f"process.dim ({self.process.dim}) must equal d ({d})."

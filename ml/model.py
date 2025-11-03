@@ -32,7 +32,7 @@ class TimeEmbedding(nn.Module):
 @register
 class ScoreNet(nn.Module):
     """
-    Input:  x  (B,C,H,W),  t (B,)
+    Input:  x  (B,C,H,W),  t (B,) (or reverse the flattened inside ... )
     Output: score estimate (B,C,H,W)
     """
     def __init__(self, in_channels: int, hidden: int = 64, time_dim: int = 64):
@@ -50,6 +50,7 @@ class ScoreNet(nn.Module):
         self.to_beta2  = nn.Linear(time_dim, hidden)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        
         # t: (B,)  -> time embedding
         temb = self.time_emb(t)  # (B, time_dim)
 

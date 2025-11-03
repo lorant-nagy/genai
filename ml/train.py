@@ -47,7 +47,6 @@ optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **optimizer
 process_name = config.corruption.process_cls
 process_parameters = config.corruption.process_params
 image_space_dim = dataset.C * dataset.H * dataset.W
-process_parameters.dim = image_space_dim
 infer_generic(config, process_parameters)
 proc = REGISTRY[process_name](**process_parameters.to_dict())
 

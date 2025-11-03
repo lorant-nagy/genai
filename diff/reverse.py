@@ -28,7 +28,6 @@ def make_reverse(base_process, score_model, T: float, constant_sigma: bool = Tru
         def __init__(self):
             # τ runs from 0 to T
             super().__init__(
-                dim=base_process.dim,
                 t0=0.0,
                 T=float(T),
                 device=base_process.device,
@@ -44,10 +43,8 @@ def make_reverse(base_process, score_model, T: float, constant_sigma: bool = Tru
             g = self.base.diffusion(z, t)
             a = g * g    # using that σ is x-independent
             t_broad = torch.full((z.shape[0],), t, device=z.device, dtype=z.dtype)
-            z_bchw = z.view(z.shape[0], *CHW)
-            score = self.score_model(z_bchw, t_broad)
-            score_flat = score.view(z.shape[0], -1)
-            return - f + a * score_flat
+            score = self.score_model(z, t_broad)
+            return - f + a * score
 
         def diffusion(self, z, tau):
             # σ, time-flipped

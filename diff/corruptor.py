@@ -56,31 +56,22 @@ class Corruptor:
 
     @torch.no_grad()
     def __call__(self, images: torch.Tensor, *, seed: Optional[int] = None) -> Dict[str, Any]:
-        if images.ndim != 4:
-            raise ValueError(f"images must be (B,C,H,W); got {tuple(images.shape)}")
 
         B, C, H, W = images.shape
-        D = C * H * W
 
         device = self.device
         dtype = self.dtype
 
-        x0 = images.to(device=device).view(B, D)
-
-        # process dimension must match flattened dimension
-        if getattr(self.process, "dim", None) is None or int(self.process.dim) != D:
-            raise ValueError(f"process.dim ({getattr(self.process,'dim',None)}) must equal C*H*W ({D}).")
-
+        x0 = images.to(device=device)
         solver = SDESolver(self.process, self.integrator)
 
         # simulate full trajectory
         t_grid, X = solver.simulate(
             x0,
             n_steps=self.n_steps,
-            seed=seed,
-            return_trajectory=True,
+            seed=seed
         )
-        # X: (T_steps+1, B, D)
+        # X: [T_steps+1, B, C, H, W]
         Tn = X.shape[0]
 
         #  (T, B, C, H, W) is assumed
@@ -93,14 +84,15 @@ class Corruptor:
         elif self.mode == "snapshot":
             # uniformly sampling of time on the grid
             if self.per_sample_time:
-                if not self.return_time_zero_state:
-                    idx = torch.randint(low=1, high=Tn, size=(B,), device=device)  # we exclude t=0
-                x_snap = X_img[idx, torch.arange(B)]
-                t_snap = t_grid[idx]  # (B,)
+                # X: (Tn, B, C, H, W), t_grid: (Tn,)
+                idx = torch.randint(1, Tn, (B,), device=X.device) if not self.return_time_zero_state else \
+                    torch.randint(0, Tn, (B,), device=X.device)
+                x_snap = X[idx, torch.arange(B)]          # (B, C, H, W)
+                t_snap = t_grid[idx]                      # (B,)
             else:
-                k = int(torch.randint(low=0, high=Tn, size=(1,), device=device).item())
-                x_snap = X_img[k]     # (B, C, H, W)
-                t_snap = t_grid[k]    # scalar tensor
+                k = int(torch.randint(0, Tn, (1,), device=X.device))
+                x_snap = X[k]                              # (B, C, H, W)
+                t_snap = t_grid[k]                         # scalar
 
             return {"x": x_snap, "t": t_snap}
         

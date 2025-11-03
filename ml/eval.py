@@ -61,7 +61,6 @@ batch_of_data = batch_of_data.to(device=config.generic.device)
 process_name = config.corruption.process_cls
 process_parameters = config.corruption.process_params
 image_space_dim = dataset.C * dataset.H * dataset.W
-process_parameters.dim = image_space_dim
 infer_generic(config, process_parameters)
 proc = REGISTRY[process_name](**process_parameters.to_dict())
 
@@ -92,12 +91,11 @@ print(f"-------> simulating backward trajectories {n_samples} samples with {n_st
 with torch.inference_mode():
     t_grid, X = backward_solver.simulate(
                 x0,
-                n_steps=n_steps,
-                return_trajectory=True,
+                n_steps=n_steps
             )
 
 print(f"-------> plotting", flush=True)
-X_img = X.view(X.shape[0], X.shape[1], dataset.C, dataset.H, dataset.W)
+X_img = X
 plot_corruption_and_samples(
     corruptor=corruptor,
     batch_of_data=batch_of_data,

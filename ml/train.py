@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 import torch
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
-from diff.score import vp_ou_score
+# from diff.score import vp_ou_score
 
 from dataset import RectanglesDataset
 from model import ScoreNet
@@ -81,7 +81,7 @@ for epoch in range(config.train.n_epochs):
     loss = 0.0
     for c,batch in enumerate(dataloader_train):
         corrupted = corruptor(batch)
-        score = vp_ou_score(corrupted['x'], batch, corrupted['t'], proc.beta)
+        score = proc.score(corrupted['x'], batch, corrupted['t'])
         prediction = model(corrupted['x'], corrupted['t'])
         output = loss_fn(prediction, score)
         loss += output

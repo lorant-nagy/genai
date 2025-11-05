@@ -25,7 +25,6 @@ from model import ScoreNet
 from diff.sde import VPOU
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
-from diff.score import vp_ou_score
 
 
 parser = argparse.ArgumentParser(description="Evaluation script")

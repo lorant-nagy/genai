@@ -1,22 +1,21 @@
-
 import argparse
 import os
 import sys
 import matplotlib.pyplot as plt
 sys.path.append(os.path.abspath(".."))
 
-from utils.config import load_cfg, infer_generic
+from utils.config import load_cfg
 from utils.registry import REGISTRY
 
 from torch.utils.data import DataLoader
 import torch
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
-# from diff.score import vp_ou_score
 
 from dataset import RectanglesDataset
 from model import ScoreNet
 from diff.sde import VPOU
+from diff.sde import SuperlinearLangevin
 
 parser = argparse.ArgumentParser(description="Training script")
 parser.add_argument("config", type=str, help="Path to the config file")
@@ -27,8 +26,6 @@ config = load_cfg(args.config)
 
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
-infer_generic(config, dataset_parameters)
-
 
 dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
@@ -47,7 +44,10 @@ optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **optimizer
 process_name = config.corruption.process_cls
 process_parameters = config.corruption.process_params
 image_space_dim = dataset.C * dataset.H * dataset.W
-infer_generic(config, process_parameters)
+
+table_path = os.path.join(config.env.results_dir, "score_tables")
+process_parameters.table_path = table_path
+
 proc = REGISTRY[process_name](**process_parameters.to_dict())
 
 integrator_name = config.corruption.integrator_cls
@@ -55,7 +55,6 @@ integrator_parameters = config.corruption.integrator_params
 integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
 
 corruptor_parameters = config.corruption.corruptor_params
-infer_generic(config, corruptor_parameters)
 corruptor_parameters.integrator = integrator
 corruptor_parameters.process = proc
 corruptor = Corruptor(**corruptor_parameters.to_dict())

@@ -4,27 +4,25 @@ from typing import Optional, Literal, Dict, Any
 import torch
 
 from diff.sim_core import SDESolver
-from diff.integrator import EulerMaruyama  # or pass a different integrator
-from diff.sim_core import Integrator  # for type hinting
+from diff.integrator import EulerMaruyama
+from diff.sim_core import Integrator
+
+from utils.globals import DEVICE, DTYPE
 
 @dataclass
 class CorruptorConfig:
     n_steps: int
     mode: Literal["trajectory", "snapshot"] = "trajectory"
     per_sample_time: bool = True  # for 'snapshot' mode: draw a separate t for each sample
-    device: Optional[torch.device] = None  # if None, will use process.device
-    dtype: Optional[torch.dtype] = None    # if None, keep input dtype
-    integrator: Optional[Integrator] = None  # if None, will use EulerMaruyama
+    integrator: Optional[Integrator] = None
     process: Optional[Any] = None  # placeholder for process type hinting
 
 class Corruptor:
     """
     Input:
         - process: ItoProcess with .dim, .t0, .T, .device, .drift(x,t), .diffusion(x,t)
-        - images:  torch.Tensor of shape (B, C, H, W).
-        - seed
-
-        * time first is assumed thorughout the code, (T, B, C, H, W)
+        - images:  torch.Tensor of shape (B, C, H, W)
+        * time first : (T, B, C, H, W)
     Output:
         If mode='trajectory':
             dict(
@@ -37,21 +35,24 @@ class Corruptor:
                 x = (B, C, H, W),  # samples at chosen time(s)
                 t = (B,) if per_sample_time else scalar tensor of shape ()
             )
-
-    Notes:
-        - No analytic marginals are used; everything is produced by Euler–Maruyama.
-        - We simulate the full grid even in 'snapshot' mode : suboptimal, but simple.
     """
 
-    def __init__(self, n_steps: int, mode: Literal["trajectory", "snapshot"] = "trajectory", per_sample_time: bool = True, integrator: Optional[EulerMaruyama] = None, process: Optional[Any] = None, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, return_time_zero_state: bool = False):
+    def __init__(self,
+                n_steps: int,
+                mode: Literal["trajectory", "snapshot"] = "trajectory",
+                per_sample_time: bool = True,
+                integrator: Optional[Integrator] = None,
+                process: Optional[Any] = None,
+                return_time_zero_state: bool = False
+                 ) -> None:
         
         self.n_steps = n_steps
         self.mode = mode
         self.per_sample_time = per_sample_time
         self.integrator = integrator
         self.process = process
-        self.device = device
-        self.dtype = dtype
+        self.device = DEVICE
+        self.dtype = DTYPE
         self.return_time_zero_state = return_time_zero_state
 
     @torch.no_grad()

@@ -4,6 +4,53 @@ import numpy as np
 from typing import Optional, Union, Tuple
 import random
 import torch
+from diff.sim_core import SDESolver
+from utils.registry import REGISTRY
+import copy
+
+from utils.globals import DEVICE, DTYPE
+
+class StationarySampler:
+    """
+    Sample from stationary distribution by running forward SDE from N(0,1).
+    """
+    
+    def __init__(self, config, equilibration_factor: float = 5.0):
+        """
+        Args:
+            equilibration_factor: Multiply T and n_steps by this factor
+        """
+        
+        self.device = DEVICE
+        self.equilibration_factor = equilibration_factor
+        
+        process_name = config.corruption.process_cls
+        process_parameters = copy.deepcopy(config.corruption.process_params)
+        process_parameters.T = process_parameters.T * equilibration_factor
+        
+        process_parameters.score_table_params = None  # No score table needed for forward process
+
+        proc = REGISTRY[process_name](**process_parameters.to_dict())
+        
+        integrator_name = config.corruption.integrator_cls
+        integrator_parameters = config.corruption.integrator_params
+        integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+
+        self.solver = SDESolver(proc, integrator)
+
+        n_steps_base = config.corruption.corruptor_params.n_steps
+        self.n_steps = int(n_steps_base * equilibration_factor)
+    
+    def __call__(self, shape: tuple) -> torch.Tensor:
+        """
+        Sample from stationary distribution.
+        """
+        # Start from N(0, 1)
+        x0 = torch.randn(shape, device=self.device)
+        with torch.no_grad():
+            t_grid, X = self.solver.simulate(x0, n_steps=self.n_steps)
+        return X[-1]
+
 
 def standard_normal_BCHW(batch_size: int, channels: int, height: int, width: int, device: str = "cpu") -> torch.Tensor:
     return torch.randn((batch_size, channels, height, width), device=device, dtype=torch.get_default_dtype())

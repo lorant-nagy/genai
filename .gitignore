@@ -11,6 +11,7 @@ run/
 TEMP/
 DATA/
 
+/config
 
 # --- Python caches & bytecode ---
 __pycache__/

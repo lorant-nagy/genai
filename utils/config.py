@@ -23,7 +23,8 @@ def load_cfg(path: str) -> Cfg:
     with open(path, "r") as f:
         return Cfg(yaml.safe_load(f))
 
-def infer_generic(config, params):
-    for key in config.generic.to_dict():
-        if hasattr(params, key):
-            setattr(params, key, getattr(config.generic, key))
+# # this infers into params from config
+# def infer_generic(config, params):
+#     for key in config.generic.to_dict():
+#         if hasattr(params, key):
+#             setattr(params, key, getattr(config.generic, key))

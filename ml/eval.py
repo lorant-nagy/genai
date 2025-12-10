@@ -1,4 +1,4 @@
-from utils.config import load_cfg, infer_generic
+from utils.config import load_cfg
 from utils.registry import REGISTRY
 from torch.utils.data import DataLoader
 import torch
@@ -11,9 +11,7 @@ from diff.sim_core import SDESolver
 from diff.reverse import make_reverse
 from diff.integrator import EulerMaruyama
 
-from utils.samplers import standard_normal_BCHW
-from utils.samplers import standard_normal_flat
-
+from diff.samplers import StationarySampler
 from utils.eval_plotting import plot_corruption_and_samples
 
 import numpy as np
@@ -38,7 +36,6 @@ config = load_cfg(args.config)
 
 dataset_name = config.dataset_eval.dataset_cls
 dataset_parameters = config.dataset_eval.dataset_params
-infer_generic(config, dataset_parameters)
 dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
 dataloader = DataLoader(dataset, **config.dataloader.to_dict())
@@ -54,13 +51,16 @@ model.eval()
 
 os.makedirs(args.eval_path, exist_ok=True)
 
-batch_of_data = next(iter(dataloader))
-batch_of_data = batch_of_data.to(device=config.generic.device)
+batch_of_images = next(iter(dataloader))
+batch_of_images = batch_of_images.to(device=config.generic.device)
 
 process_name = config.corruption.process_cls
 process_parameters = config.corruption.process_params
 image_space_dim = dataset.C * dataset.H * dataset.W
-infer_generic(config, process_parameters)
+
+table_path = os.path.join(config.env.results_dir, "score_tables")
+process_parameters.table_path = table_path
+
 proc = REGISTRY[process_name](**process_parameters.to_dict())
 
 integrator_name = config.corruption.integrator_cls
@@ -69,7 +69,6 @@ integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
 
 
 corruptor_parameters = config.corruption.corruptor_params
-infer_generic(config, corruptor_parameters)
 corruptor_parameters.integrator = integrator
 corruptor_parameters.process = proc
 # override mode : . \to "trajectory"
@@ -84,7 +83,13 @@ integrator_name = config.corruption.integrator_cls
 integrator_parameters = config.corruption.integrator_params
 integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
 backward_solver = SDESolver(reverse_sde, integrator)
-x0 = standard_normal_BCHW(n_samples, dataset.C, dataset.H, dataset.W, device=config.generic.device)
+
+print(f"-------> creating stationary sampler", flush=True)
+stationary_sampler = StationarySampler(config, equilibration_factor=5.0)
+
+print(f"-------> sampling from stationary distribution", flush=True)
+x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
+
 n_steps = config.eval.n_steps
 print(f"-------> simulating backward trajectories {n_samples} samples with {n_steps} steps", flush=True)
 with torch.inference_mode():
@@ -95,9 +100,14 @@ with torch.inference_mode():
 
 print(f"-------> plotting", flush=True)
 X_img = X
+
+X_img_denorm = (X_img + 1.0) / 2.0  # [-1, 1] → [0, 1]
+
+batch_of_data_denorm = (batch_of_images + 1.0) / 2.0  # [-1, 1] → [0, 1]
+
 plot_corruption_and_samples(
     corruptor=corruptor,
-    batch_of_data=batch_of_data,
+    batch_of_data=batch_of_data_denorm,
     eval_path=args.eval_path,
     cmap="gray",
     max_trajectories=5,
@@ -106,6 +116,6 @@ plot_corruption_and_samples(
     mark_t0_indices=True,
     label_data_sample_indices=True,
     t_grid=t_grid,
-    X=X_img[:, :9],
+    X=X_img_denorm[:, :9],
     n_time_cols=10,
 )

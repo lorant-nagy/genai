@@ -55,7 +55,6 @@ class SuperlinearLangevin(ItoProcess):
     Samples from potential U(x) = (c_α/(α+1))|x|^(α+1) + (c_0/2)x^2
     
     Automatically builds or loads conditional score table on initialization.
-    Provides stationary distribution sampling for reverse process initialization.
     """
     
     def __init__(

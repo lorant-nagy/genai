@@ -58,8 +58,8 @@ process_name = config.corruption.process_cls
 process_parameters = config.corruption.process_params
 image_space_dim = dataset.C * dataset.H * dataset.W
 
-table_path = os.path.join(config.env.results_dir, "score_tables")
-process_parameters.table_path = table_path
+table_dir = os.path.join(config.env.results_dir, "score_tables")
+process_parameters.table_dir = table_dir
 
 proc = REGISTRY[process_name](**process_parameters.to_dict())
 

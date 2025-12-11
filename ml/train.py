@@ -1,3 +1,5 @@
+import petname
+
 import argparse
 import os
 import sys
@@ -19,10 +21,24 @@ from diff.sde import SuperlinearLangevin
 
 parser = argparse.ArgumentParser(description="Training script")
 parser.add_argument("config", type=str, help="Path to the config file")
-parser.add_argument("results_path", type=str, help="Path to save training results")
 args = parser.parse_args()
 
 config = load_cfg(args.config)
+
+petname_str = petname.generate(2, separator="-")
+time_str = os.popen("date +%Y%m%d_%H%M%S").read().strip()
+
+results_dir = config.env.results_dir
+run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
+table_dir = os.path.join(results_dir, "score_tables")
+os.makedirs(run_dir, exist_ok=True)
+os.makedirs(table_dir, exist_ok=True)
+
+
+results_path = petname_str + "_" + args.results_path
+os.makedirs(results_path, exist_ok=True)
+
+
 
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
@@ -45,8 +61,7 @@ process_name = config.corruption.process_cls
 process_parameters = config.corruption.process_params
 image_space_dim = dataset.C * dataset.H * dataset.W
 
-table_path = os.path.join(config.env.results_dir, "score_tables")
-process_parameters.table_path = table_path
+process_parameters.table_dir = table_dir
 
 proc = REGISTRY[process_name](**process_parameters.to_dict())
 
@@ -62,6 +77,7 @@ corruptor = Corruptor(**corruptor_parameters.to_dict())
 loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
 
 # print info on training
+print(f"RUN NAME : ------------------ {petname_str} ------------------")
 print(f"-- dataset: {dataset_name} with parameters {dataset_parameters}")
 print(f"-- model: {model_name} with parameters {model_parameters}")
 print(f"-- corruption process: {process_name} with parameters {process_parameters}")
@@ -97,7 +113,7 @@ for epoch in range(config.train.n_epochs):
 print(f"*** training finished", flush=True)
 
 # save model
-torch.save(best_model, os.path.join(args.results_path, "best_model.pth"))
+torch.save(best_model, os.path.join(run_dir, "best_model.pth"))
 
 # report training
 print("REPORT ON TRAINING:")
@@ -106,7 +122,7 @@ print(f"Best Loss: {best_loss:.6f}", flush=True)
 # evaluate
 print("*** starting evaluation", flush=True)
 eval_script_path = os.path.join(os.path.dirname(__file__), "eval.py")
-os.system(f"python {eval_script_path} {args.config} {os.path.join(args.results_path, 'best_model.pth')} {args.results_path}")
+os.system(f"python {eval_script_path} {args.config} {os.path.join(run_dir, 'best_model.pth')} {run_dir}")
 print("*** evaluation finished", flush=True)
 
 #  plots
@@ -116,5 +132,7 @@ plt.xlabel("Epoch")
 plt.ylabel("Average Loss per Sample")
 plt.title("Loss Evolution During Training")
 plt.grid()
-plt.savefig(os.path.join(args.results_path, "loss_evolution.png"))
+plt.savefig(os.path.join(run_dir, "loss_evolution.png"))
 plt.close()
+
+print(f"RUN NAME : ------------------ {petname_str} ------------------")

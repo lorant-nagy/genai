@@ -79,7 +79,7 @@ run_one_config () {
 
   # Prepare results dir: <env.results_dir>/<config_stem>/<YYYYmmdd_HHMMSS>
   local stem ts RESULTS_DIR LOG_FILE
-  stem=$(basename "$cfg"); stem="${stem%.*}"
+  stem=$(basename "$cfg"); stem="${stem%.*}"; stem="${stem}_runs"
   ts=$(date +"%Y%m%d_%H%M%S")
   RESULTS_DIR="$RESULTS_BASE/$stem/$ts"
   mkdir -p "$RESULTS_DIR" || die "Failed to create results dir: $RESULTS_DIR"

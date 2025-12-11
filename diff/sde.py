@@ -68,7 +68,7 @@ class SuperlinearLangevin(ItoProcess):
         sigma: float = 1.0,
         device: str = "cpu",
         score_table_params: Optional[dict] = None,
-        table_path: str = None,
+        table_dir: str = None,
     ) -> None:
         super().__init__(t0=t0, T=T, device=device)
         
@@ -81,12 +81,12 @@ class SuperlinearLangevin(ItoProcess):
         self.score_table_obj = None
         
         if score_table_params is not None:
-            if table_path is None:
+            if table_dir is None:
                 raise ValueError("path must be provided when score_table_params is given.")
             
             # Ensure directory exists
-            os.makedirs(table_path, exist_ok=True)
-            table_file_path = os.path.join(table_path, "score_table.pt")
+            os.makedirs(table_dir, exist_ok=True)
+            table_file_path = os.path.join(table_dir, "score_table.pt")
             
             # Build ScoreTableConfig from the nested dict
             score_config = ScoreTableConfig(

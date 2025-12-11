@@ -36,6 +36,10 @@ table_dir = os.path.join(results_dir, "score_tables")
 os.makedirs(run_dir, exist_ok=True)
 os.makedirs(table_dir, exist_ok=True)
 
+with open(os.path.join(run_dir, "config.yaml"), "w") as f:
+    import yaml
+    yaml.dump(config.to_dict(), f)
+
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
 
@@ -119,7 +123,7 @@ print(f"Best Loss: {best_loss:.6f}", flush=True)
 # evaluate
 print("[bold green]*** STARTING EVALUATION[/bold green]")
 eval_script_path = os.path.join(os.path.dirname(__file__), "eval.py")
-os.system(f"python -m ml.eval {args.config} {os.path.join(run_dir, 'best_model.pth')} {run_dir}")
+os.system(f"python -m ml.eval {os.path.join(run_dir, 'config.yaml')} {os.path.join(run_dir, 'best_model.pth')} {run_dir}")
 
 #  plots
 plt.figure()

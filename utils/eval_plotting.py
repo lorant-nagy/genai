@@ -72,7 +72,8 @@ def _save_samples_strip(samples, out_path, *, cmap, vmin, vmax, dpi, annotate: b
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0)
     fig.savefig(out_path, dpi=dpi)
     plt.close(fig)
-    print(f"Saved {out_path}", flush=True)
+    # print(f"Saved {out_path}", flush=True)
+
 
 
 def _linspace_indices(T: int, target_cols: int, reverse: bool = False) -> np.ndarray:
@@ -142,7 +143,7 @@ def _plot_grid_with_header(
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
     fig.savefig(out_path, dpi=dpi)
     plt.close(fig)
-    print(f"Saved {out_path}", flush=True)
+    # print(f"Saved {out_path}", flush=True)
 
 
 # ------------------------- main entry -------------------------

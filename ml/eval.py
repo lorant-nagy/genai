@@ -1,10 +1,10 @@
-from utils.config import load_cfg
-from utils.registry import REGISTRY
 from torch.utils.data import DataLoader
 import torch
 import sys
 import os
 sys.path.append(os.path.abspath(".."))
+from utils.registry import REGISTRY
+from utils.config import load_cfg
 import argparse
 
 from diff.sim_core import SDESolver
@@ -18,8 +18,8 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 
-from dataset import RectanglesDataset
-from model import ScoreNet
+from ml.dataset import RectanglesDataset
+from ml.model import ScoreNet
 from diff.sde import VPOU
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
@@ -119,3 +119,5 @@ plot_corruption_and_samples(
     X=X_img_denorm[:, :9],
     n_time_cols=10,
 )
+
+print("*** evaluation finished", flush=True)

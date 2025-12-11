@@ -1,5 +1,7 @@
 import petname
 
+from rich import print
+
 import argparse
 import os
 import sys
@@ -14,8 +16,8 @@ import torch
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
 
-from dataset import RectanglesDataset
-from model import ScoreNet
+from ml.dataset import RectanglesDataset
+from ml.model import ScoreNet
 from diff.sde import VPOU
 from diff.sde import SuperlinearLangevin
 
@@ -33,12 +35,6 @@ run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
 table_dir = os.path.join(results_dir, "score_tables")
 os.makedirs(run_dir, exist_ok=True)
 os.makedirs(table_dir, exist_ok=True)
-
-
-results_path = petname_str + "_" + args.results_path
-os.makedirs(results_path, exist_ok=True)
-
-
 
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
@@ -77,17 +73,18 @@ corruptor = Corruptor(**corruptor_parameters.to_dict())
 loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
 
 # print info on training
-print(f"RUN NAME : ------------------ {petname_str} ------------------")
-print(f"-- dataset: {dataset_name} with parameters {dataset_parameters}")
-print(f"-- model: {model_name} with parameters {model_parameters}")
-print(f"-- corruption process: {process_name} with parameters {process_parameters}")
-print(f"-- corruption integrator: {integrator_name} with parameters {integrator_parameters}")
-print(f"-- corruption parameters: {corruptor_parameters}")
-print(f"-- optimizer: {optimizer_name} with parameters {optimizer_parameters}")
-print(f"-- loss: {config.loss.cls} with parameters {config.loss.loss_params}")
+print("[bold green]---------------------------------------------------------------[/bold green]")
+print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")
+print("[bold green]---------------------------------------------------------------[/bold green]")
+print(f"-- dataset: {dataset_name}")
+print(f"-- model: {model_name}")
+print(f"-- corruption process: {process_name}")
+print(f"-- corruption integrator: {integrator_name}")
+print(f"-- optimizer: {optimizer_name}")
+print(f"-- loss: {config.loss.cls}")
 print(f"-- training for {config.train.n_epochs} epochs")
 
-print(f"*** training started")
+print(f"[bold green]*** TRAINING STARTED[/bold green]")
 best_model = None
 best_loss = float('inf')
 average_loss_per_sample = 0.0
@@ -116,14 +113,13 @@ print(f"*** training finished", flush=True)
 torch.save(best_model, os.path.join(run_dir, "best_model.pth"))
 
 # report training
-print("REPORT ON TRAINING:")
+print("[bold green]REPORT ON TRAINING:[/bold green]")
 print(f"Best Loss: {best_loss:.6f}", flush=True)
 
 # evaluate
-print("*** starting evaluation", flush=True)
+print("[bold green]*** STARTING EVALUATION[/bold green]")
 eval_script_path = os.path.join(os.path.dirname(__file__), "eval.py")
-os.system(f"python {eval_script_path} {args.config} {os.path.join(run_dir, 'best_model.pth')} {run_dir}")
-print("*** evaluation finished", flush=True)
+os.system(f"python -m ml.eval {args.config} {os.path.join(run_dir, 'best_model.pth')} {run_dir}")
 
 #  plots
 plt.figure()
@@ -135,4 +131,4 @@ plt.grid()
 plt.savefig(os.path.join(run_dir, "loss_evolution.png"))
 plt.close()
 
-print(f"RUN NAME : ------------------ {petname_str} ------------------")
+print(f"[bold green]RUN ENDED -- NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")

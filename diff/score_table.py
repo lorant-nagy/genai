@@ -259,6 +259,7 @@ class ScoreTable:
         
         # Will be populated by build()
         self.S = None
+        self.p_table = None  # Density table p(x,t|x0) - optional, for analytics
         self.x0_grid = None
         self.x_grid = None
         self.t_grid = None
@@ -378,6 +379,9 @@ class ScoreTable:
         
         print("  Computing scores from densities...")
         
+        # Store density table for analytics
+        self.p_table = p_table.clone()  # Clone to avoid issues if p_table is modified
+        
         # Compute scores
         self.S = self._compute_score_table(p_table)
         
@@ -388,25 +392,35 @@ class ScoreTable:
         
         print("Score table built successfully.")
     
-    def save(self, path: str):
+    def save(self, path: str, save_density: bool = True):
         """
         Save score table to disk.
         
         Args:
             path: File path (will create parent directories)
+            save_density: If True, also save the density table p(x,t|x0) (default: True)
+                         This adds memory but enables analytics on the density.
         """
         if self.S is None:
             raise RuntimeError("Score table not built. Call build() first.")
         
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
         
-        torch.save({
+        save_dict = {
             'S': self.S.cpu(),
             'x0_grid': self.x0_grid.cpu(),
             'x_grid': self.x_grid.cpu(),
             't_grid': self.t_grid.cpu(),
             'config': self.config.to_dict(),
-        }, path)
+        }
+        
+        # Optionally include density table
+        if save_density and self.p_table is not None:
+            save_dict['p_table'] = self.p_table.cpu()
+            size_mb = self.p_table.numel() * 4 / 1e6  # float32 = 4 bytes
+            print(f"  Including density table in save (adds ~{size_mb:.1f} MB)")
+        
+        torch.save(save_dict, path)
     
     @classmethod
     def load(cls, path: str, process) -> ScoreTable:
@@ -447,6 +461,14 @@ class ScoreTable:
         table.x0_grid = data['x0_grid'].to(process.device)
         table.x_grid = data['x_grid'].to(process.device)
         table.t_grid = data['t_grid'].to(process.device)
+        
+        # Load density table if it was saved
+        if 'p_table' in data:
+            table.p_table = data['p_table'].to(process.device)
+            size_mb = table.p_table.numel() * 4 / 1e6
+            print(f"  Loaded density table (~{size_mb:.1f} MB)")
+        else:
+            print(f"  Note: Density table not found in saved file (score-only mode)")
         
         # Build interpolator
         table.interpolator = ScoreInterpolator(table)
@@ -598,7 +620,8 @@ class ScoreInterpolator:
 def build_score_table(
     process,
     config: ScoreTableConfig,
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    save_density: bool = True
 ) -> ScoreTable:
     """
     Convenience function to build and optionally save score table.
@@ -607,6 +630,7 @@ def build_score_table(
         process: SuperlinearLangevin instance
         config: Score table configuration
         save_path: Optional path to save the table
+        save_density: If True, also save density table p(x,t|x0) (default: True)
         
     Returns:
         Built ScoreTable instance
@@ -620,12 +644,17 @@ def build_score_table(
             alpha=3.0, c_alpha=1.0, c_0=0.5,
             sigma=1.0, T=24.0,
         )
-        table = build_score_table(process, config, save_path="cache/table.pt")
+        
+        # Save both score and density
+        table = build_score_table(process, config, save_path="cache/table.pt", save_density=True)
+        
+        # Save only score (smaller file)
+        table = build_score_table(process, config, save_path="cache/table.pt", save_density=False)
     """
     table = ScoreTable(process, config, device=process.device)
     table.build()
     
     if save_path:
-        table.save(save_path)
+        table.save(save_path, save_density=save_density)
     
     return table

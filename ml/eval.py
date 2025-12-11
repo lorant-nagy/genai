@@ -12,7 +12,7 @@ from diff.reverse import make_reverse
 from diff.integrator import EulerMaruyama
 
 from diff.samplers import StationarySampler
-from utils.eval_plotting import plot_corruption_and_samples
+from utils.eval_plotting import plot_corruption_and_samples, plot_score_table_heatmaps, plot_density_table_heatmaps
 
 import numpy as np
 
@@ -119,5 +119,32 @@ plot_corruption_and_samples(
     X=X_img_denorm[:, :9],
     n_time_cols=10,
 )
+
+#  Plot score table heatmaps if available
+if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
+    print(f"-------> plotting score table heatmaps", flush=True)
+    plot_score_table_heatmaps(
+        score_table_obj=proc.score_table_obj,
+        process=proc,
+        eval_path=args.eval_path,
+        n_time_points=10,
+        dpi=150,
+        style="bladerunner"  # Options: 'bladerunner', 'green_magenta', 'viridis', 'plasma'
+    )
+    
+    # Also plot density table if available
+    print(f"-------> plotting density table heatmaps", flush=True)
+    plot_density_table_heatmaps(
+        score_table_obj=proc.score_table_obj,
+        process=proc,
+        eval_path=args.eval_path,
+        n_time_points=10,
+        dpi=150,
+        style="viridis",  # Good for probability densities
+        log_scale=True  # Use log scale for better visualization
+    )
+else:
+    print(f"-------> score table not available, skipping heatmaps", flush=True)
+
 
 print("*** evaluation finished", flush=True)

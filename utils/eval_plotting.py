@@ -148,6 +148,310 @@ def _plot_grid_with_header(
 
 # ------------------------- main entry -------------------------
 
+def plot_score_table_heatmaps(
+    score_table_obj,
+    process,
+    eval_path: str,
+    *,
+    n_time_points: int = 10,
+    dpi: int = 150,
+    style: str = "bladerunner",
+) -> None:
+    """
+    Visualize score table as heatmaps across time with Blade Runner aesthetics.
+    
+    Args:
+        score_table_obj: ScoreTable instance with .S, .x0_grid, .x_grid, .t_grid
+        process: Process instance with parameters (alpha, c_alpha, c_0, sigma, T)
+        eval_path: Directory to save the figure
+        n_time_points: Number of time slices to show (default 10)
+        dpi: Figure DPI
+        style: Color style - 'bladerunner' (cyan-magenta), 'green_magenta', or matplotlib cmap
+    """
+    os.makedirs(eval_path, exist_ok=True)
+    
+    # Extract data
+    S = _to_numpy(score_table_obj.S)  # [N_x0, N_t, N_x]
+    x0_grid = _to_numpy(score_table_obj.x0_grid)
+    x_grid = _to_numpy(score_table_obj.x_grid)
+    t_grid = _to_numpy(score_table_obj.t_grid)
+    
+    N_x0, N_t, N_x = S.shape
+    
+    # Select time indices (evenly spaced)
+    if n_time_points >= N_t:
+        time_indices = np.arange(N_t)
+    else:
+        time_indices = np.linspace(0, N_t - 1, n_time_points).round().astype(int)
+    
+    n_plots = len(time_indices)
+    
+    # Layout: 2 rows if we have many plots, otherwise 1 row
+    if n_plots <= 5:
+        nrows, ncols = 1, n_plots
+    else:
+        nrows, ncols = 2, (n_plots + 1) // 2
+    
+    # Create custom colormap (Blade Runner style)
+    if style == "bladerunner":
+        from matplotlib.colors import LinearSegmentedColormap
+        # Dark → Deep blue → Cyan → Magenta → White
+        colors = ['#0a0a0a', '#1a3a52', '#2e7d8c', '#00ffff', '#ff00ff', '#ffffff']
+        n_bins = 256
+        cmap = LinearSegmentedColormap.from_list('bladerunner', colors, N=n_bins)
+    elif style == "green_magenta":
+        from matplotlib.colors import LinearSegmentedColormap
+        # Black → Green → Magenta
+        colors = ['#000000', '#003300', '#00ff00', '#ff00ff']
+        cmap = LinearSegmentedColormap.from_list('green_magenta', colors, N=256)
+    else:
+        cmap = style  # Use matplotlib built-in
+    
+    # Create figure with dark background
+    fig = plt.figure(figsize=(ncols * 3.5, nrows * 3.2 + 0.8), facecolor='#0a0a0a')
+    
+    # Main title with process parameters
+    title_lines = []
+    title_lines.append("Conditional Score Table: ∇ₓ log p(x,t|x₀)")
+    
+    # Process parameters
+    if hasattr(process, 'alpha'):
+        title_lines.append(
+            f"Process: α={process.alpha:.2f}, c_α={process.c_alpha:.2f}, "
+            f"c₀={process.c_0:.2f}, σ={process.sigma:.2f}, T={process.T:.2f}"
+        )
+    elif hasattr(process, 'beta'):
+        title_lines.append(f"Process: VPOU, β={process.beta:.2f}, T={process.T:.2f}")
+    
+    # Table parameters
+    title_lines.append(
+        f"Grid: {N_x0}×{N_t}×{N_x} points | "
+        f"x₀∈[{x0_grid[0]:.2f},{x0_grid[-1]:.2f}] | "
+        f"x∈[{x_grid[0]:.2f},{x_grid[-1]:.2f}]"
+    )
+    
+    fig.suptitle('\n'.join(title_lines), fontsize=11, color='#00ffff', 
+                 weight='bold', y=0.98)
+    
+    # Compute global vmin/vmax for consistent color scaling
+    vmin, vmax = np.percentile(S, [1, 99])
+    
+    # Create subplots
+    for idx, t_idx in enumerate(time_indices):
+        row = idx // ncols
+        col = idx % ncols
+        
+        ax = plt.subplot(nrows, ncols, idx + 1, facecolor='#0a0a0a')
+        
+        # Get score slice at this time: [N_x0, N_x]
+        score_slice = S[:, t_idx, :]
+        t_val = t_grid[t_idx]
+        
+        # Plot heatmap
+        im = ax.imshow(
+            score_slice,
+            extent=[x_grid[0], x_grid[-1], x0_grid[0], x0_grid[-1]],
+            origin='lower',
+            aspect='auto',
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            interpolation='bilinear'
+        )
+        
+        # Styling
+        ax.set_xlabel('x (noisy state)', fontsize=9, color='#00ffff')
+        ax.set_ylabel('x₀ (initial)', fontsize=9, color='#00ffff')
+        ax.set_title(f't = {t_val:.3f}', fontsize=10, color='#ff00ff', weight='bold', pad=8)
+        
+        # Tick styling
+        ax.tick_params(colors='#00ffff', labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#00ffff')
+            spine.set_linewidth(0.5)
+        
+        # Grid
+        ax.grid(True, alpha=0.15, color='#00ffff', linewidth=0.3)
+    
+    # Remove empty subplots if n_plots doesn't fill the grid
+    total_subplots = nrows * ncols
+    for idx in range(n_plots, total_subplots):
+        ax = plt.subplot(nrows, ncols, idx + 1)
+        ax.axis('off')
+    
+    # Add colorbar
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
+    cbar = fig.colorbar(im, cax=cbar_ax)
+    cbar.set_label('Score ∇ₓ log p', fontsize=9, color='#00ffff', rotation=270, labelpad=20)
+    cbar.ax.tick_params(colors='#00ffff', labelsize=8)
+    cbar.outline.set_edgecolor('#00ffff')
+    cbar.outline.set_linewidth(0.5)
+    
+    plt.subplots_adjust(left=0.06, right=0.90, bottom=0.08, top=0.92, 
+                       wspace=0.35, hspace=0.35)
+    
+    out_path = os.path.join(eval_path, "score_table_heatmaps.png")
+    fig.savefig(out_path, dpi=dpi, facecolor='#0a0a0a')
+    plt.close(fig)
+    print(f"Saved score table heatmaps to {out_path}", flush=True)
+
+
+def plot_density_table_heatmaps(
+    score_table_obj,
+    process,
+    eval_path: str,
+    *,
+    n_time_points: int = 10,
+    dpi: int = 150,
+    style: str = "viridis",
+    log_scale: bool = True,
+) -> None:
+    """
+    Visualize density table p(x,t|x0) as heatmaps across time.
+    
+    Args:
+        score_table_obj: ScoreTable instance (or dict) with .p_table attribute
+        process: Process instance with parameters  
+        eval_path: Directory to save the figure
+        n_time_points: Number of time slices to show (default 10)
+        dpi: Figure DPI
+        style: Color style (default 'viridis' for probability densities)
+        log_scale: If True, plot log(p+eps) for better visualization (default True)
+    """
+    os.makedirs(eval_path, exist_ok=True)
+    
+    # Handle both dict and object inputs
+    if isinstance(score_table_obj, dict):
+        if 'p_table' not in score_table_obj:
+            print("  Density table not found in score_table_obj (score-only mode)", flush=True)
+            return
+        p_table = _to_numpy(score_table_obj['p_table'])
+        x0_grid = _to_numpy(score_table_obj['x0_grid'])
+        x_grid = _to_numpy(score_table_obj['x_grid'])
+        t_grid = _to_numpy(score_table_obj['t_grid'])
+        config = score_table_obj.get('config', {})
+        
+        if process is None:
+            class MockProcess:
+                def __init__(self, cfg):
+                    self.alpha = cfg.get('alpha')
+                    self.c_alpha = cfg.get('c_alpha')
+                    self.c_0 = cfg.get('c_0')
+                    self.sigma = cfg.get('sigma')
+                    self.T = cfg.get('T')
+                    self.beta = cfg.get('beta')
+            process = MockProcess(config)
+    else:
+        if not hasattr(score_table_obj, 'p_table') or score_table_obj.p_table is None:
+            print("  Density table not available in score_table_obj", flush=True)
+            return
+        p_table = _to_numpy(score_table_obj.p_table)  # [N_x0, N_t, N_x]
+        x0_grid = _to_numpy(score_table_obj.x0_grid)
+        x_grid = _to_numpy(score_table_obj.x_grid)
+        t_grid = _to_numpy(score_table_obj.t_grid)
+    
+    N_x0, N_t, N_x = p_table.shape
+    
+    # Apply log scale if requested
+    if log_scale:
+        eps = 1e-12
+        plot_data = np.log(p_table + eps)
+        data_label = 'log p(x,t|x₀)'
+    else:
+        plot_data = p_table
+        data_label = 'p(x,t|x₀)'
+    
+    # Select time indices
+    if n_time_points >= N_t:
+        time_indices = np.arange(N_t)
+    else:
+        time_indices = np.linspace(0, N_t - 1, n_time_points).round().astype(int)
+    
+    n_plots = len(time_indices)
+    
+    # Layout
+    if n_plots <= 5:
+        nrows, ncols = 1, n_plots
+    else:
+        nrows, ncols = 2, (n_plots + 1) // 2
+    
+    # Create figure
+    fig = plt.figure(figsize=(ncols * 3.5, nrows * 3.2 + 0.8))
+    
+    # Title
+    title_lines = []
+    title_lines.append(f"Conditional Density Table: {data_label}")
+    
+    if process is not None:
+        if hasattr(process, 'alpha') and process.alpha is not None:
+            title_lines.append(
+                f"Process: α={process.alpha:.2f}, c_α={process.c_alpha:.2f}, "
+                f"c₀={process.c_0:.2f}, σ={process.sigma:.2f}, T={process.T:.2f}"
+            )
+        elif hasattr(process, 'beta') and process.beta is not None:
+            title_lines.append(f"Process: VPOU, β={process.beta:.2f}, T={process.T:.2f}")
+    
+    title_lines.append(
+        f"Grid: {N_x0}×{N_t}×{N_x} points | "
+        f"x₀∈[{x0_grid[0]:.2f},{x0_grid[-1]:.2f}] | "
+        f"x∈[{x_grid[0]:.2f},{x_grid[-1]:.2f}]"
+    )
+    
+    fig.suptitle('\n'.join(title_lines), fontsize=11, weight='bold', y=0.98)
+    
+    # Compute global vmin/vmax
+    vmin, vmax = np.percentile(plot_data, [1, 99])
+    
+    # Create subplots
+    for idx, t_idx in enumerate(time_indices):
+        row = idx // ncols
+        col = idx % ncols
+        
+        ax = plt.subplot(nrows, ncols, idx + 1)
+        
+        # Get density slice: [N_x0, N_x]
+        density_slice = plot_data[:, t_idx, :]
+        t_val = t_grid[t_idx]
+        
+        # Plot heatmap
+        im = ax.imshow(
+            density_slice,
+            extent=[x_grid[0], x_grid[-1], x0_grid[0], x0_grid[-1]],
+            origin='lower',
+            aspect='auto',
+            cmap=style,
+            vmin=vmin,
+            vmax=vmax,
+            interpolation='bilinear'
+        )
+        
+        ax.set_xlabel('x (state)', fontsize=9)
+        ax.set_ylabel('x₀ (initial)', fontsize=9)
+        ax.set_title(f't = {t_val:.3f}', fontsize=10, weight='bold', pad=8)
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.2, linewidth=0.3)
+    
+    # Remove empty subplots
+    total_subplots = nrows * ncols
+    for idx in range(n_plots, total_subplots):
+        ax = plt.subplot(nrows, ncols, idx + 1)
+        ax.axis('off')
+    
+    # Colorbar
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
+    cbar = fig.colorbar(im, cax=cbar_ax)
+    cbar.set_label(data_label, fontsize=9, rotation=270, labelpad=20)
+    cbar.ax.tick_params(labelsize=8)
+    
+    plt.subplots_adjust(left=0.06, right=0.90, bottom=0.08, top=0.92, 
+                       wspace=0.35, hspace=0.35)
+    
+    out_path = os.path.join(eval_path, "density_table_heatmaps.png")
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+    print(f"Saved density table heatmaps to {out_path}", flush=True)
+
+
 def plot_corruption_and_samples(
     corruptor,
     batch_of_data: torch.Tensor,

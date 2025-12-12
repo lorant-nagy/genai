@@ -24,6 +24,8 @@ from diff.sde import VPOU
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
 
+from utils.globals import DEVICE, DTYPE
+
 
 parser = argparse.ArgumentParser(description="Evaluation script")
 parser.add_argument("config", type=str, help="Path to the config file")
@@ -46,13 +48,13 @@ model_parameters.in_channels = dataset.C
 model = REGISTRY[model_name](**model_parameters.to_dict())
 state_dict = torch.load(args.state_dict)
 model.load_state_dict(state_dict)
-model.to(device=config.generic.device)
+model.to(device=DEVICE)
 model.eval()
 
 os.makedirs(args.eval_path, exist_ok=True)
 
 batch_of_images = next(iter(dataloader))
-batch_of_images = batch_of_images.to(device=config.generic.device)
+batch_of_images = batch_of_images.to(device=DEVICE)
 
 process_name = config.corruption.process_cls
 process_parameters = config.corruption.process_params
@@ -129,7 +131,7 @@ if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
         eval_path=args.eval_path,
         n_time_points=10,
         dpi=150,
-        style="bladerunner"  # Options: 'bladerunner', 'green_magenta', 'viridis', 'plasma'
+        style="RdBu_r"  # Standard diverging colormap: Blue (negative) → White (zero) → Red (positive)
     )
     
     # Also plot density table if available
@@ -141,7 +143,7 @@ if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
         n_time_points=10,
         dpi=150,
         style="viridis",  # Good for probability densities
-        log_scale=True  # Use log scale for better visualization
+        log_scale=False  # Linear scale works better for heatmaps (no striping)
     )
 else:
     print(f"-------> score table not available, skipping heatmaps", flush=True)

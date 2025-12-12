@@ -26,127 +26,131 @@ from diff.sim_core import SDESolver, ItoProcess
 
 from utils.globals import DEVICE, DTYPE
 
-
-parser = argparse.ArgumentParser(description="Evaluation script")
-parser.add_argument("config", type=str, help="Path to the config file")
-parser.add_argument("state_dict", type=str, help="Path to the state dict")
-parser.add_argument("eval_path", type=str, help="Path to save evaluation results")
-args = parser.parse_args()
+from rich import print
 
 
-config = load_cfg(args.config)
+# parser = argparse.ArgumentParser(description="Evaluation script")
+# parser.add_argument("config", type=str, help="Path to the config file")
+# parser.add_argument("state_dict", type=str, help="Path to the state dict")
+# parser.add_argument("eval_path", type=str, help="Path to save evaluation results")
+# args = parser.parse_args()
 
-dataset_name = config.dataset_eval.dataset_cls
-dataset_parameters = config.dataset_eval.dataset_params
-dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
+def eval(config, state_dict_path, eval_path):
+    print("*** starting evaluation", flush=True)
 
-dataloader = DataLoader(dataset, **config.dataloader.to_dict())
+    # config = load_cfg(config)
 
-model_name = config.model.cls
-model_parameters = config.model.model_params
-model_parameters.in_channels = dataset.C
-model = REGISTRY[model_name](**model_parameters.to_dict())
-state_dict = torch.load(args.state_dict)
-model.load_state_dict(state_dict)
-model.to(device=DEVICE)
-model.eval()
+    dataset_name = config.dataset_eval.dataset_cls
+    dataset_parameters = config.dataset_eval.dataset_params
+    dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
-os.makedirs(args.eval_path, exist_ok=True)
+    dataloader = DataLoader(dataset, **config.dataloader.to_dict())
 
-batch_of_images = next(iter(dataloader))
-batch_of_images = batch_of_images.to(device=DEVICE)
+    model_name = config.model.cls
+    model_parameters = config.model.model_params
+    model_parameters.in_channels = dataset.C
+    model = REGISTRY[model_name](**model_parameters.to_dict())
+    state_dict = torch.load(state_dict_path)
+    model.load_state_dict(state_dict)
+    model.to(device=DEVICE)
+    model.eval()
 
-process_name = config.corruption.process_cls
-process_parameters = config.corruption.process_params
-image_space_dim = dataset.C * dataset.H * dataset.W
+    os.makedirs(eval_path, exist_ok=True)
 
-table_dir = os.path.join(config.env.results_dir, "score_tables")
-process_parameters.table_dir = table_dir
+    batch_of_images = next(iter(dataloader))
+    batch_of_images = batch_of_images.to(device=DEVICE)
 
-proc = REGISTRY[process_name](**process_parameters.to_dict())
+    process_name = config.corruption.process_cls
+    process_parameters = config.corruption.process_params
+    image_space_dim = dataset.C * dataset.H * dataset.W
 
-integrator_name = config.corruption.integrator_cls
-integrator_parameters = config.corruption.integrator_params
-integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+    table_dir = os.path.join(config.env.results_dir, "score_tables")
+    process_parameters.table_dir = table_dir
+
+    proc = REGISTRY[process_name](**process_parameters.to_dict())
+
+    integrator_name = config.corruption.integrator_cls
+    integrator_parameters = config.corruption.integrator_params
+    integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
 
 
-corruptor_parameters = config.corruption.corruptor_params
-corruptor_parameters.integrator = integrator
-corruptor_parameters.process = proc
-# override mode : . \to "trajectory"
-corruptor_parameters.mode = "trajectory"
-corruptor = Corruptor(**corruptor_parameters.to_dict())
+    corruptor_parameters = config.corruption.corruptor_params
+    corruptor_parameters.integrator = integrator
+    corruptor_parameters.process = proc
+    # override mode : . \to "trajectory"
+    corruptor_parameters.mode = "trajectory"
+    corruptor = Corruptor(**corruptor_parameters.to_dict())
 
-CHW = (dataset.C, dataset.H, dataset.W)
+    CHW = (dataset.C, dataset.H, dataset.W)
 
-n_samples = config.eval.n_samples
-reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
-integrator_name = config.corruption.integrator_cls
-integrator_parameters = config.corruption.integrator_params
-integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
-backward_solver = SDESolver(reverse_sde, integrator)
+    n_samples = config.eval.n_samples
+    reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+    integrator_name = config.corruption.integrator_cls
+    integrator_parameters = config.corruption.integrator_params
+    integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+    backward_solver = SDESolver(reverse_sde, integrator)
 
-print(f"-------> creating stationary sampler", flush=True)
-stationary_sampler = StationarySampler(config, equilibration_factor=5.0)
+    print(f"-------> creating stationary sampler", flush=True)
+    stationary_sampler = StationarySampler(config, equilibration_factor=5.0)
 
-print(f"-------> sampling from stationary distribution", flush=True)
-x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
+    print(f"-------> sampling from stationary distribution", flush=True)
+    x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
 
-n_steps = config.eval.n_steps
-print(f"-------> simulating backward trajectories {n_samples} samples with {n_steps} steps", flush=True)
-with torch.inference_mode():
-    t_grid, X = backward_solver.simulate(
-                x0,
-                n_steps=n_steps
-            )
+    n_steps = config.eval.n_steps
+    print(f"-------> simulating backward trajectories {n_samples} samples with {n_steps} steps", flush=True)
+    with torch.inference_mode():
+        t_grid, X = backward_solver.simulate(
+                    x0,
+                    n_steps=n_steps
+                )
 
-print(f"-------> plotting", flush=True)
-X_img = X
+    print(f"-------> plotting", flush=True)
+    X_img = X
 
-X_img_denorm = (X_img + 1.0) / 2.0  # [-1, 1] → [0, 1]
+    X_img_denorm = (X_img + 1.0) / 2.0  # [-1, 1] → [0, 1]
 
-batch_of_data_denorm = (batch_of_images + 1.0) / 2.0  # [-1, 1] → [0, 1]
+    batch_of_data_denorm = (batch_of_images + 1.0) / 2.0  # [-1, 1] → [0, 1]
 
-plot_corruption_and_samples(
-    corruptor=corruptor,
-    batch_of_data=batch_of_data_denorm,
-    eval_path=args.eval_path,
-    cmap="gray",
-    max_trajectories=5,
-    sample_grid_count=9,
-    show_time_header=True,
-    mark_t0_indices=True,
-    label_data_sample_indices=True,
-    t_grid=t_grid,
-    X=X_img_denorm[:, :9],
-    n_time_cols=10,
-)
-
-#  Plot score table heatmaps if available
-if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
-    print(f"-------> plotting score table heatmaps", flush=True)
-    plot_score_table_heatmaps(
-        score_table_obj=proc.score_table_obj,
-        process=proc,
-        eval_path=args.eval_path,
-        n_time_points=10,
-        dpi=150,
-        style="RdBu_r"  # Standard diverging colormap: Blue (negative) → White (zero) → Red (positive)
+    plot_corruption_and_samples(
+        corruptor=corruptor,
+        batch_of_data=batch_of_data_denorm,
+        eval_path=eval_path,
+        cmap="gray",
+        max_trajectories=5,
+        sample_grid_count=9,
+        show_time_header=True,
+        mark_t0_indices=True,
+        label_data_sample_indices=True,
+        t_grid=t_grid,
+        X=X_img_denorm[:, :9],
+        n_time_cols=10,
     )
-    
-    # Also plot density table if available
-    print(f"-------> plotting density table heatmaps", flush=True)
-    plot_density_table_heatmaps(
-        score_table_obj=proc.score_table_obj,
-        process=proc,
-        eval_path=args.eval_path,
-        n_time_points=10,
-        dpi=150,
-        style="viridis",  # Good for probability densities
-        log_scale=False  # Linear scale works better for heatmaps (no striping)
-    )
-else:
-    print(f"-------> score table not available, skipping heatmaps", flush=True)
+
+    #  Plot score table heatmaps if available
+    if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
+        print(f"-------> plotting score table heatmaps", flush=True)
+        plot_score_table_heatmaps(
+            score_table_obj=proc.score_table_obj,
+            process=proc,
+            eval_path=eval_path,
+            n_time_points=10,
+            dpi=150,
+            style="RdBu_r"  # Standard diverging colormap: Blue (negative) → White (zero) → Red (positive)
+        )
+        
+        # Also plot density table if available
+        print(f"-------> plotting density table heatmaps", flush=True)
+        plot_density_table_heatmaps(
+            score_table_obj=proc.score_table_obj,
+            process=proc,
+            eval_path=eval_path,
+            n_time_points=10,
+            dpi=150,
+            style="viridis",  # Good for probability densities
+            log_scale=False  # Linear scale works better for heatmaps (no striping)
+        )
+    else:
+        print(f"-------> score table not available, skipping heatmaps", flush=True)
 
 
-print("*** evaluation finished", flush=True)
+    print("*** evaluation finished", flush=True)

@@ -11,6 +11,8 @@ sys.path.append(os.path.abspath(".."))
 from utils.config import load_cfg
 from utils.registry import REGISTRY
 
+from ml.eval import eval
+
 from torch.utils.data import DataLoader
 import torch
 from diff.corruptor import Corruptor
@@ -122,8 +124,7 @@ print(f"Best Loss: {best_loss:.6f}", flush=True)
 
 # evaluate
 print("[bold green]*** STARTING EVALUATION[/bold green]")
-eval_script_path = os.path.join(os.path.dirname(__file__), "eval.py")
-os.system(f"python -m ml.eval {os.path.join(run_dir, 'config.yaml')} {os.path.join(run_dir, 'best_model.pth')} {run_dir}")
+eval(config, os.path.join(run_dir, "best_model.pth"), run_dir)
 
 #  plots
 plt.figure()

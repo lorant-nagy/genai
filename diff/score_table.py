@@ -20,6 +20,15 @@ from typing import Callable, Optional, Tuple, Dict, Any
 import warnings
 
 
+class ScoreTableNumericalError(Exception):
+    """
+    Exception raised when score table building encounters numerical instability.
+    This includes NaN values, Inf values, or severe mass loss.
+    """
+    pass
+from rich import print
+
+
 @dataclass
 class ScoreTableConfig:
     """Configuration for score table construction and storage."""
@@ -32,13 +41,14 @@ class ScoreTableConfig:
     # Domain bounds
     x_min: float
     x_max: float
-    x0_min: float = -1.0
-    x0_max: float = 1.0
+    x0_min: float = -1.2
+    x0_max: float = 1.2
     
     # PDE solver parameters
     initial_gaussian_std: float = 0.01
     density_clamp_eps: float = 1e-12
     boundary_condition: str = "zero_flux"
+    time_stepping_scheme: str = "explicit_euler"  # Options: "explicit_euler", "semi_implicit", "tamed_euler"
     
     # Storage
     cache_dir: str = "cache"
@@ -112,11 +122,14 @@ class PDESolver1D:
         # Check CFL condition for stability
         max_drift = torch.abs(self.g_scal(self.x_grid)).max().item()
         cfl = (max_drift * self.dt) / self.dx
-        if cfl > 0.5:
-            warnings.warn(
-                f"CFL number {cfl:.3f} may be too large for stability. "
-                f"Consider reducing dt or increasing N_x."
-            )
+        if cfl > 0.25:  # Stricter criterion to prevent oscillations
+            # warnings.warn(
+            #     f"CFL number {cfl:.3f} is too large for stability. "
+            #     f"Reduce dt or increase N_x. Recommended: CFL < 0.25"
+            # )
+            print(f"[red] CFL number: {cfl:.3f} [/red]")
+        else:
+            print(f"[green]CFL number: {cfl:.3f} [/green]")
     
     def _initialize_delta_approx(self, x0: float) -> torch.Tensor:
         """
@@ -131,8 +144,17 @@ class PDESolver1D:
         std = self.config.initial_gaussian_std
         p_0 = torch.exp(-0.5 * ((self.x_grid - x0) / std) ** 2)
         
+        # Check for zero mass (x0 outside grid or too narrow Gaussian)
+        total_mass = p_0.sum() * self.dx
+        if total_mass < 1e-10:
+            raise ScoreTableNumericalError(
+                f"Initial condition has zero mass for x0={x0:.4f}. "
+                f"x0 is outside grid range [{self.x_grid[0].item():.4f}, {self.x_grid[-1].item():.4f}] "
+                f"or initial_gaussian_std={std} is too small."
+            )
+        
         # Normalize
-        p_0 = p_0 / (p_0.sum() * self.dx)
+        p_0 = p_0 / total_mass
         
         return p_0
     
@@ -151,8 +173,34 @@ class PDESolver1D:
         N_x = len(self.x_grid)
         flux = torch.zeros(N_x + 1, device=self.device)
         
+        # Check input
+        if torch.isinf(p).any():
+            raise ScoreTableNumericalError("Inf in density before flux computation")
+        if torch.isnan(p).any():
+            raise ScoreTableNumericalError("NaN in density before flux computation")
+        
+        # Compute drift at grid points
+        g_vals = self.g_scal(self.x_grid)
+        
+        # Check drift function
+        if torch.isinf(g_vals).any():
+            bad_idx = torch.where(torch.isinf(g_vals))[0][0]
+            x_bad = self.x_grid[bad_idx].item()
+            raise ScoreTableNumericalError(
+                f"Inf in drift function g(x) at x={x_bad:.4f}. "
+                f"Grid range: [{self.x_grid[0].item():.4f}, {self.x_grid[-1].item():.4f}]"
+            )
+        
         # Drift contribution (at cell centers, then interpolate to faces)
-        drift_term = self.g_scal(self.x_grid) * p
+        drift_term = g_vals * p
+        
+        # Check drift term
+        if torch.isinf(drift_term).any():
+            bad_idx = torch.where(torch.isinf(drift_term))[0][0]
+            raise ScoreTableNumericalError(
+                f"Inf in drift_term at index {bad_idx}: "
+                f"g={g_vals[bad_idx].item():.4e}, p={p[bad_idx].item():.4e}"
+            )
         
         # Diffusion coefficient
         diff_coeff = 0.5 * self.sigma ** 2
@@ -182,9 +230,9 @@ class PDESolver1D:
     
     def _time_step(self, p: torch.Tensor) -> torch.Tensor:
         """
-        Advance density by one time step using explicit Euler.
+        Advance density by one time step.
         
-        p_new[j] = p[j] - (dt/dx) * (flux[j+1] - flux[j])
+        Dispatches to appropriate scheme based on config.
         
         Args:
             p: Current density, shape (N_x,)
@@ -192,20 +240,217 @@ class PDESolver1D:
         Returns:
             p_next: Density at next time step, shape (N_x,)
         """
+        scheme = self.config.time_stepping_scheme
+        
+        if scheme == "explicit_euler":
+            return self._time_step_explicit_euler(p)
+        elif scheme == "semi_implicit":
+            return self._time_step_semi_implicit(p)
+        elif scheme == "tamed_euler":
+            return self._time_step_tamed_euler(p)
+        else:
+            raise ValueError(f"Unknown time stepping scheme: {scheme}")
+    
+    def _time_step_explicit_euler(self, p: torch.Tensor) -> torch.Tensor:
+        """
+        Explicit Euler time step (original method).
+        
+        Pros: Simple, conservative
+        Cons: Unstable for superlinear drift, requires tiny dt
+        """
         flux = self._compute_flux(p)
+        
+        # Check flux for problems
+        if torch.isinf(flux).any():
+            raise ScoreTableNumericalError(
+                "Inf detected in flux computation. "
+                "Likely cause: drift values too large (check CFL condition)"
+            )
         
         # Conservative update
         p_next = p - (self.dt / self.dx) * (flux[1:] - flux[:-1])
         
-        # Ensure non-negativity (can have small numerical errors)
+        # Check for numerical issues
+        if torch.isnan(p_next).any():
+            raise ScoreTableNumericalError("NaN detected in density during time evolution")
+        
+        if torch.isinf(p_next).any():
+            max_p = p.max().item()
+            max_flux_diff = (flux[1:] - flux[:-1]).abs().max().item()
+            raise ScoreTableNumericalError(
+                f"Inf detected in density during time evolution. "
+                f"max(p)={max_p:.2e}, max(flux_diff)={max_flux_diff:.2e}, "
+                f"CFL too large - numerical instability"
+            )
+        
+        # Ensure non-negativity
         p_next = torch.clamp(p_next, min=0.0)
         
-        # Renormalize to maintain probability conservation
-        total_mass = p_next.sum() * self.dx
-        if total_mass > 1e-10:
-            p_next = p_next / total_mass
+        return p_next
+    
+    def _time_step_semi_implicit(self, p: torch.Tensor) -> torch.Tensor:
+        """
+        Semi-implicit (IMEX) time step.
+        
+        Drift (advection): explicit
+        Diffusion: implicit (Crank-Nicolson)
+        
+        Solves: (I - 0.5*dt*D) p^{n+1} = (I + 0.5*dt*D) p^n - dt * div(g*p^n)
+        
+        Pros: Much more stable, allows larger dt
+        Cons: Requires tridiagonal solve
+        """
+        N_x = len(self.x_grid)
+        
+        # Explicit drift term
+        g_vals = self.g_scal(self.x_grid)
+        drift_term = g_vals * p
+        
+        # Compute drift flux divergence: -d/dx(g*p)
+        drift_div = torch.zeros(N_x, device=self.device)
+        drift_div[1:-1] = -(drift_term[2:] - drift_term[:-2]) / (2 * self.dx)
+        drift_div[0] = -(drift_term[1] - drift_term[0]) / self.dx
+        drift_div[-1] = -(drift_term[-1] - drift_term[-2]) / self.dx
+        
+        # Diffusion coefficient
+        D = 0.5 * self.sigma ** 2
+        
+        # Build tridiagonal system for implicit diffusion
+        # (I - 0.5*dt*D*Laplacian) p^{n+1} = RHS
+        
+        alpha = 0.5 * D * self.dt / (self.dx ** 2)
+        
+        # Tridiagonal matrix coefficients
+        lower = -alpha * torch.ones(N_x - 1, device=self.device)
+        diag = (1 + 2 * alpha) * torch.ones(N_x, device=self.device)
+        upper = -alpha * torch.ones(N_x - 1, device=self.device)
+        
+        # Boundary conditions
+        if self.config.boundary_condition == "zero_flux":
+            # Neumann: no flux at boundaries
+            diag[0] = 1 + alpha
+            diag[-1] = 1 + alpha
+        elif self.config.boundary_condition == "absorbing":
+            # Dirichlet: p = 0 at boundaries
+            diag[0] = 1
+            diag[-1] = 1
+            upper[0] = 0
+            lower[-1] = 0
+        
+        # RHS: explicit diffusion + drift
+        # (I + 0.5*dt*D*Laplacian) p^n + dt * drift_div
+        rhs = p.clone()
+        rhs[1:-1] += alpha * (p[2:] - 2 * p[1:-1] + p[:-2])
+        
+        if self.config.boundary_condition == "zero_flux":
+            rhs[0] += alpha * (p[1] - p[0])
+            rhs[-1] += alpha * (p[-2] - p[-1])
+        
+        rhs += self.dt * drift_div
+        
+        # Solve tridiagonal system
+        p_next = self._solve_tridiagonal(lower, diag, upper, rhs)
+        
+        # Check for issues
+        if torch.isnan(p_next).any():
+            raise ScoreTableNumericalError("NaN in semi-implicit solver")
+        if torch.isinf(p_next).any():
+            raise ScoreTableNumericalError("Inf in semi-implicit solver")
+        
+        # Ensure non-negativity
+        p_next = torch.clamp(p_next, min=0.0)
         
         return p_next
+    
+    def _time_step_tamed_euler(self, p: torch.Tensor) -> torch.Tensor:
+        """
+        Tamed Euler time step.
+        
+        Caps the drift when it becomes too large to ensure stability.
+        
+        g_tamed = g / (1 + dt * |g| / dx)
+        
+        Pros: Explicit, provably stable
+        Cons: Adds artificial damping, less accurate
+        """
+        # Compute drift
+        g_vals = self.g_scal(self.x_grid)
+        
+        # Taming factor
+        taming_factor = 1.0 / (1.0 + self.dt * torch.abs(g_vals) / self.dx)
+        g_tamed = g_vals * taming_factor
+        
+        # Use tamed drift in flux
+        drift_term = g_tamed * p
+        
+        # Diffusion
+        diff_coeff = 0.5 * self.sigma ** 2
+        
+        # Conservative flux update
+        flux = torch.zeros(len(self.x_grid) + 1, device=self.device)
+        
+        for j in range(1, len(self.x_grid)):
+            drift_flux = 0.5 * (drift_term[j-1] + drift_term[j])
+            diff_flux = -diff_coeff * (p[j] - p[j-1]) / self.dx
+            flux[j] = drift_flux + diff_flux
+        
+        # Boundary fluxes (same as before)
+        if self.config.boundary_condition == "zero_flux":
+            flux[0] = 0.0
+            flux[-1] = 0.0
+        
+        p_next = p - (self.dt / self.dx) * (flux[1:] - flux[:-1])
+        
+        # Check
+        if torch.isnan(p_next).any():
+            raise ScoreTableNumericalError("NaN in tamed Euler")
+        if torch.isinf(p_next).any():
+            raise ScoreTableNumericalError("Inf in tamed Euler")
+        
+        p_next = torch.clamp(p_next, min=0.0)
+        
+        return p_next
+    
+    def _solve_tridiagonal(self, lower: torch.Tensor, diag: torch.Tensor, 
+                          upper: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+        """
+        Solve tridiagonal system: A x = rhs
+        
+        Uses Thomas algorithm (stable for diagonally dominant matrices).
+        
+        Args:
+            lower: Lower diagonal, length N-1
+            diag: Main diagonal, length N
+            upper: Upper diagonal, length N-1
+            rhs: Right hand side, length N
+            
+        Returns:
+            x: Solution, length N
+        """
+        N = len(diag)
+        
+        # Forward sweep
+        c = torch.zeros(N - 1, device=self.device)
+        d = torch.zeros(N, device=self.device)
+        
+        c[0] = upper[0] / diag[0]
+        d[0] = rhs[0] / diag[0]
+        
+        for i in range(1, N - 1):
+            denom = diag[i] - lower[i-1] * c[i-1]
+            c[i] = upper[i] / denom
+            d[i] = (rhs[i] - lower[i-1] * d[i-1]) / denom
+        
+        d[-1] = (rhs[-1] - lower[-1] * d[-2]) / (diag[-1] - lower[-1] * c[-2])
+        
+        # Backward sweep
+        x = torch.zeros(N, device=self.device)
+        x[-1] = d[-1]
+        
+        for i in range(N - 2, -1, -1):
+            x[i] = d[i] - c[i] * x[i + 1]
+        
+        return x
     
     def solve(self, x0: float) -> torch.Tensor:
         """
@@ -377,13 +622,27 @@ class ScoreTable:
             
             p_table[k] = pde_solver.solve(x0_k.item())
         
+        # Check density table
+        if torch.isnan(p_table).any():
+            raise ScoreTableNumericalError("NaN detected in density table")
+        
+        if torch.isinf(p_table).any():
+            raise ScoreTableNumericalError("Inf detected in density table")
+        
         print("  Computing scores from densities...")
         
         # Store density table for analytics
-        self.p_table = p_table.clone()  # Clone to avoid issues if p_table is modified
+        self.p_table = p_table.clone()
         
         # Compute scores
         self.S = self._compute_score_table(p_table)
+        
+        # Check score table
+        if torch.isnan(self.S).any():
+            raise ScoreTableNumericalError("NaN detected in score table")
+        
+        if torch.isinf(self.S).any():
+            raise ScoreTableNumericalError("Inf detected in score table")
         
         print("  Building interpolator...")
         
@@ -623,34 +882,7 @@ def build_score_table(
     save_path: Optional[str] = None,
     save_density: bool = True
 ) -> ScoreTable:
-    """
-    Convenience function to build and optionally save score table.
     
-    Args:
-        process: SuperlinearLangevin instance
-        config: Score table configuration
-        save_path: Optional path to save the table
-        save_density: If True, also save density table p(x,t|x0) (default: True)
-        
-    Returns:
-        Built ScoreTable instance
-        
-    Example:
-        from diff.score_table import build_score_table, ScoreTableConfig
-        
-        config = ScoreTableConfig(
-            N_x0=100, N_x=500, N_t=200,
-            x_min=-5.0, x_max=5.0,
-            alpha=3.0, c_alpha=1.0, c_0=0.5,
-            sigma=1.0, T=24.0,
-        )
-        
-        # Save both score and density
-        table = build_score_table(process, config, save_path="cache/table.pt", save_density=True)
-        
-        # Save only score (smaller file)
-        table = build_score_table(process, config, save_path="cache/table.pt", save_density=False)
-    """
     table = ScoreTable(process, config, device=process.device)
     table.build()
     

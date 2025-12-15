@@ -1,4 +1,5 @@
 import petname
+import wandb
 
 from rich import print
 
@@ -23,6 +24,7 @@ from ml.model import ScoreNet
 from diff.sde import VPOU
 from diff.sde import SuperlinearLangevin
 
+
 parser = argparse.ArgumentParser(description="Training script")
 parser.add_argument("config", type=str, help="Path to the config file")
 args = parser.parse_args()
@@ -31,6 +33,11 @@ config = load_cfg(args.config)
 
 petname_str = petname.generate(2, separator="-")
 time_str = os.popen("date +%Y%m%d_%H%M%S").read().strip()
+
+print("[bold green]---------------------------------------------------------------[/bold green]")
+print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")
+print("[bold green]---------------------------------------------------------------[/bold green]")
+
 
 results_dir = config.env.results_dir
 run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
@@ -41,6 +48,19 @@ os.makedirs(table_dir, exist_ok=True)
 with open(os.path.join(run_dir, "config.yaml"), "w") as f:
     import yaml
     yaml.dump(config.to_dict(), f)
+
+# Initialize wandb
+wandb_config = config.wandb
+wandb.init(
+        project=getattr(wandb_config, 'project', 'diffusion-training'),
+        entity=getattr(wandb_config, 'entity', None),
+        name=petname_str,
+        config=config.to_dict(),
+        dir=run_dir,
+        mode=getattr(wandb_config, 'mode', 'online'),
+        notes=getattr(wandb_config, 'notes', ''),
+        tags=[config.corruption.process_cls, config.model.cls] + getattr(wandb_config, 'tags', [])
+    )
 
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
@@ -55,6 +75,9 @@ model_parameters.in_channels = dataset.C
 
 model = REGISTRY[model_name](**model_parameters.to_dict())
 
+# Watch model gradients
+wandb.watch(model, log="all", log_freq=100)
+
 optimizer_name = config.train.optimizer_cls
 optimizer_parameters = config.train.optimizer_params
 optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **optimizer_parameters.to_dict())
@@ -65,7 +88,16 @@ image_space_dim = dataset.C * dataset.H * dataset.W
 
 process_parameters.table_dir = table_dir
 
-proc = REGISTRY[process_name](**process_parameters.to_dict())
+# Import the exception class to catch it
+from diff.score_table import ScoreTableNumericalError
+
+try:
+    proc = REGISTRY[process_name](**process_parameters.to_dict())
+except ScoreTableNumericalError as e:
+    print(f"\n[bold red]Score table build failed: {str(e)}[/bold red]")
+    wandb.log({"status": "terminated_score_table_error"})
+    wandb.finish()
+    sys.exit(1)
 
 integrator_name = config.corruption.integrator_cls
 integrator_parameters = config.corruption.integrator_params
@@ -79,9 +111,7 @@ corruptor = Corruptor(**corruptor_parameters.to_dict())
 loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
 
 # print info on training
-print("[bold green]---------------------------------------------------------------[/bold green]")
-print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")
-print("[bold green]---------------------------------------------------------------[/bold green]")
+
 print(f"-- dataset: {dataset_name}")
 print(f"-- model: {model_name}")
 print(f"-- corruption process: {process_name}")
@@ -97,7 +127,7 @@ average_loss_per_sample = 0.0
 loss_evo = []
 for epoch in range(config.train.n_epochs):
     loss = 0.0
-    for c,batch in enumerate(dataloader_train):
+    for c, batch in enumerate(dataloader_train):
         corrupted = corruptor(batch)
         score = proc.score(corrupted['x'], batch, corrupted['t'])
         prediction = model(corrupted['x'], corrupted['t'])
@@ -106,34 +136,76 @@ for epoch in range(config.train.n_epochs):
         output.backward()
         optimizer.step()
         optimizer.zero_grad()
+        
+        # Log to wandb
+        wandb.log({
+            "batch_loss": output.item()
+        })
+        
         print(f"batch {c+1}/{len(dataloader_train)}", end="\r", flush=True)
+    
     average_loss_per_sample = loss.item()/len(dataloader_train)
     print(f"Epoch {epoch+1}/{config.train.n_epochs} || Loss: {average_loss_per_sample:.6f}", flush=True)
     loss_evo.append(average_loss_per_sample)
-    if average_loss_per_sample < best_loss:
-        best_loss = average_loss_per_sample
-        best_model = model.state_dict()
+    
+    # Log to wandb
+    wandb.log({
+        "epoch": epoch + 1,
+        "epoch_loss": average_loss_per_sample,
+        "best_loss": best_loss
+    })
+    
+    # Check if this is the best model (handles NaN/Inf properly)
+    if not (torch.isnan(torch.tensor(average_loss_per_sample)) or 
+            torch.isinf(torch.tensor(average_loss_per_sample))):
+        if average_loss_per_sample < best_loss:
+            best_loss = average_loss_per_sample
+            best_model = model.state_dict()
+
+# Safety: if no best model was saved (all losses were NaN/Inf), save the last model
+if best_model is None:
+    print("[bold yellow]Warning: No valid loss found during training. Saving last model state.[/bold yellow]")
+    best_model = model.state_dict()
+    best_loss = average_loss_per_sample
+
 print(f"*** training finished", flush=True)
 
 # save model
-torch.save(best_model, os.path.join(run_dir, "best_model.pth"))
+model_path = os.path.join(run_dir, "best_model.pth")
+torch.save(best_model, model_path)
+wandb.save(model_path)
 
 # report training
 print("[bold green]REPORT ON TRAINING:[/bold green]")
 print(f"Best Loss: {best_loss:.6f}", flush=True)
 
+# Log final summary
+wandb.summary["best_loss"] = best_loss
+wandb.summary["total_epochs"] = config.train.n_epochs
+
 # evaluate
 print("[bold green]*** STARTING EVALUATION[/bold green]")
-eval(config, os.path.join(run_dir, "best_model.pth"), run_dir)
+eval(config, model_path, run_dir)
 
-#  plots
+# plots
 plt.figure()
 plt.plot(loss_evo)
 plt.xlabel("Epoch")
 plt.ylabel("Average Loss per Sample")
 plt.title("Loss Evolution During Training")
 plt.grid()
-plt.savefig(os.path.join(run_dir, "loss_evolution.png"))
+loss_plot_path = os.path.join(run_dir, "loss_evolution.png")
+plt.savefig(loss_plot_path)
 plt.close()
 
+# Log to wandb
+wandb.log({"loss_evolution": wandb.Image(loss_plot_path)})
+
+
+
+# Finish wandb
+wandb.finish()
+
+print("[bold green]---------------------------------------------------------------[/bold green]")
 print(f"[bold green]RUN ENDED -- NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")
+print("[bold green]---------------------------------------------------------------[/bold green]")

@@ -2,6 +2,8 @@ from torch.utils.data import DataLoader
 import torch
 import sys
 import os
+import wandb
+
 sys.path.append(os.path.abspath(".."))
 from utils.registry import REGISTRY
 from utils.config import load_cfg
@@ -29,16 +31,8 @@ from utils.globals import DEVICE, DTYPE
 from rich import print
 
 
-# parser = argparse.ArgumentParser(description="Evaluation script")
-# parser.add_argument("config", type=str, help="Path to the config file")
-# parser.add_argument("state_dict", type=str, help="Path to the state dict")
-# parser.add_argument("eval_path", type=str, help="Path to save evaluation results")
-# args = parser.parse_args()
-
 def eval(config, state_dict_path, eval_path):
     print("*** starting evaluation", flush=True)
-
-    # config = load_cfg(config)
 
     dataset_name = config.dataset_eval.dataset_cls
     dataset_parameters = config.dataset_eval.dataset_params
@@ -72,7 +66,6 @@ def eval(config, state_dict_path, eval_path):
     integrator_name = config.corruption.integrator_cls
     integrator_parameters = config.corruption.integrator_params
     integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
-
 
     corruptor_parameters = config.corruption.corruptor_params
     corruptor_parameters.integrator = integrator
@@ -111,6 +104,7 @@ def eval(config, state_dict_path, eval_path):
 
     batch_of_data_denorm = (batch_of_images + 1.0) / 2.0  # [-1, 1] → [0, 1]
 
+    # Plot corruption and samples
     plot_corruption_and_samples(
         corruptor=corruptor,
         batch_of_data=batch_of_data_denorm,
@@ -126,7 +120,10 @@ def eval(config, state_dict_path, eval_path):
         n_time_cols=10,
     )
 
-    #  Plot score table heatmaps if available
+    # final_samples = X_img_denorm[:, -1]  # Shape: (n_samples, C, H, W)
+    # samples_np = final_samples.cpu().numpy()
+
+    # Plot score table heatmaps if available
     if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
         print(f"-------> plotting score table heatmaps", flush=True)
         plot_score_table_heatmaps(
@@ -134,8 +131,7 @@ def eval(config, state_dict_path, eval_path):
             process=proc,
             eval_path=eval_path,
             n_time_points=10,
-            dpi=150,
-            style="RdBu_r"  # Standard diverging colormap: Blue (negative) → White (zero) → Red (positive)
+            dpi=150
         )
         
         # Also plot density table if available
@@ -146,11 +142,30 @@ def eval(config, state_dict_path, eval_path):
             eval_path=eval_path,
             n_time_points=10,
             dpi=150,
-            style="viridis",  # Good for probability densities
             log_scale=False  # Linear scale works better for heatmaps (no striping)
         )
     else:
         print(f"-------> score table not available, skipping heatmaps", flush=True)
 
+    # Log all plots to wandb (only if they exist)
+    print(f"-------> logging to wandb", flush=True)
+    
+    plots_to_log = {
+        "backward_final_samples": "backward_final_samples.png",
+        "score_table_heatmaps": "score_table_heatmaps.png",
+        "density_table_heatmaps": "density_table_heatmaps.png",
+        "corruption_trajectories": "corruption_trajectories.png",
+        "reverse_evolution": "reverse_evolution.png",
+        "data_samples": "data_samples.png",
+    }
+    
+    for key, filename in plots_to_log.items():
+        filepath = os.path.join(eval_path, filename)
+        if os.path.exists(filepath):
+            wandb.log({key: wandb.Image(filepath)})
+            print(f"  ✓ Logged {key}")
+        else:
+            print(f"  ✗ Skipped {key} (file not found)")
+            
 
     print("*** evaluation finished", flush=True)

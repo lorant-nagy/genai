@@ -155,10 +155,9 @@ def plot_score_table_heatmaps(
     *,
     n_time_points: int = 10,
     dpi: int = 150,
-    style: str = "bladerunner",
 ) -> None:
     """
-    Visualize score table as heatmaps across time with Blade Runner aesthetics.
+    Visualize score table as heatmaps across time.
     
     Args:
         score_table_obj: ScoreTable instance with .S, .x0_grid, .x_grid, .t_grid
@@ -166,7 +165,6 @@ def plot_score_table_heatmaps(
         eval_path: Directory to save the figure
         n_time_points: Number of time slices to show (default 10)
         dpi: Figure DPI
-        style: Color style - 'bladerunner' (cyan-magenta), 'green_magenta', or matplotlib cmap
     """
     os.makedirs(eval_path, exist_ok=True)
     
@@ -192,104 +190,65 @@ def plot_score_table_heatmaps(
     else:
         nrows, ncols = 2, (n_plots + 1) // 2
     
-    # Use standard diverging colormap for scores (centered at zero)
-    # RdBu_r: Blue (negative) → White (zero) → Red (positive)
-    if style == "bladerunner" or style == "diverging":
-        cmap = 'RdBu_r'  # Standard diverging colormap (reversed)
-    elif style == "green_magenta":
-        from matplotlib.colors import LinearSegmentedColormap
-        # Black → Green → Magenta
-        colors = ['#000000', '#003300', '#00ff00', '#ff00ff']
-        cmap = LinearSegmentedColormap.from_list('green_magenta', colors, N=256)
-    else:
-        cmap = style  # Use matplotlib built-in
+    # Fixed colormap: standard diverging for scores (centered at zero)
+    cmap = 'RdBu_r'  # Blue (negative) → White (zero) → Red (positive)
     
-    # Create figure with explicit white background
-    fig = plt.figure(figsize=(ncols * 3.5, nrows * 3.2 + 0.8), facecolor='white')
+    # Create figure
+    fig = plt.figure(figsize=(ncols * 3.5, nrows * 3.2 + 0.8))
     
-    # Main title with process parameters
-    title_lines = []
-    title_lines.append("Conditional Score Table: ∇ₓ log p(x,t|x₀)")
+    # Main title
+    title_lines = ["Score Table: ∇ₓ log p(x,t|x₀)"]
     
-    # Process parameters
     if hasattr(process, 'alpha'):
         title_lines.append(
-            f"Process: α={process.alpha:.2f}, c_α={process.c_alpha:.2f}, "
+            f"α={process.alpha:.2f}, c_α={process.c_alpha:.2f}, "
             f"c₀={process.c_0:.2f}, σ={process.sigma:.2f}, T={process.T:.2f}"
         )
     elif hasattr(process, 'beta'):
-        title_lines.append(f"Process: VPOU, β={process.beta:.2f}, T={process.T:.2f}")
+        title_lines.append(f"β={process.beta:.2f}, T={process.T:.2f}")
     
-    # Table parameters
-    title_lines.append(
-        f"Grid: {N_x0}×{N_t}×{N_x} points | "
-        f"x₀∈[{x0_grid[0]:.2f},{x0_grid[-1]:.2f}] | "
-        f"x∈[{x_grid[0]:.2f},{x_grid[-1]:.2f}]"
-    )
+    fig.suptitle('\n'.join(title_lines), fontsize=11)
     
-    fig.suptitle('\n'.join(title_lines), fontsize=11, weight='bold', y=0.98)
-    
-    # Compute symmetric color scale centered at zero
-    # Use 95th percentile to avoid outliers causing range issues
-    max_abs_score = np.percentile(np.abs(S), 95)
-    vmin, vmax = -max_abs_score, max_abs_score
-    
-    print(f"  Score range: [{S.min():.3f}, {S.max():.3f}]", flush=True)
-    print(f"  Color scale: [{vmin:.3f}, {vmax:.3f}]", flush=True)
+    # Fixed color scale for score visualization
+    # Scores are gradients ∇ₓ log p, typically in range [-10, 10] for normalized data
+    vmin, vmax = -10.0, 10.0  # Fixed symmetric range
     
     # Create subplots
     for idx, t_idx in enumerate(time_indices):
-        row = idx // ncols
-        col = idx % ncols
+        ax = plt.subplot(nrows, ncols, idx + 1)
         
-        ax = plt.subplot(nrows, ncols, idx + 1, facecolor='white')
-        
-        # Get score slice at this time: [N_x0, N_x]
         score_slice = S[:, t_idx, :]
         t_val = t_grid[t_idx]
         
-        # Plot heatmap with proper clipping to avoid white artifacts
-        im = ax.imshow(
-            score_slice,
-            extent=[x_grid[0], x_grid[-1], x0_grid[0], x0_grid[-1]],
-            origin='lower',
-            aspect='auto',
+        # Use pcolormesh instead of imshow - no aliasing artifacts
+        im = ax.pcolormesh(
+            x_grid, x0_grid, score_slice,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
-            interpolation='nearest',  # Honest representation
-            clip_on=True  # Clip values to colormap range
+            shading='nearest',
         )
         
-        # Styling
-        ax.set_xlabel('x (noisy state)', fontsize=9)
-        ax.set_ylabel('x₀ (initial)', fontsize=9)
-        ax.set_title(f't = {t_val:.3f}', fontsize=10, weight='bold', pad=8)
-        
-        # Grid and ticks
-        ax.tick_params(labelsize=8)
-        ax.grid(True, alpha=0.2, linewidth=0.3)
-        
-        # Ensure axes background is white
-        ax.set_facecolor('white')
+        ax.set_xlabel('x')
+        ax.set_ylabel('x₀')
+        ax.set_title(f't = {t_val:.3f}')
     
-    # Remove empty subplots if n_plots doesn't fill the grid
+    # Remove empty subplots
     total_subplots = nrows * ncols
     for idx in range(n_plots, total_subplots):
         ax = plt.subplot(nrows, ncols, idx + 1)
         ax.axis('off')
     
-    # Add colorbar
+    # Colorbar
     cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
     cbar = fig.colorbar(im, cax=cbar_ax)
-    cbar.set_label('Score ∇ₓ log p', fontsize=9, rotation=270, labelpad=20)
-    cbar.ax.tick_params(labelsize=8)
+    cbar.set_label('Score', rotation=270, labelpad=15)
     
-    plt.subplots_adjust(left=0.06, right=0.90, bottom=0.08, top=0.92, 
-                       wspace=0.35, hspace=0.35)
+    plt.subplots_adjust(left=0.08, right=0.90, bottom=0.08, top=0.92, 
+                       wspace=0.30, hspace=0.30)
     
     out_path = os.path.join(eval_path, "score_table_heatmaps.png")
-    fig.savefig(out_path, dpi=dpi, facecolor='white', edgecolor='none')
+    fig.savefig(out_path, dpi=dpi)
     plt.close(fig)
     print(f"Saved score table heatmaps to {out_path}", flush=True)
 
@@ -301,7 +260,6 @@ def plot_density_table_heatmaps(
     *,
     n_time_points: int = 10,
     dpi: int = 150,
-    style: str = "viridis",
     log_scale: bool = True,
 ) -> None:
     """
@@ -313,7 +271,6 @@ def plot_density_table_heatmaps(
         eval_path: Directory to save the figure
         n_time_points: Number of time slices to show (default 10)
         dpi: Figure DPI
-        style: Color style (default 'viridis' for probability densities)
         log_scale: If True, plot log(p+eps) for better visualization (default True)
     """
     os.makedirs(eval_path, exist_ok=True)
@@ -373,67 +330,53 @@ def plot_density_table_heatmaps(
     else:
         nrows, ncols = 2, (n_plots + 1) // 2
     
+    # Fixed colormap: standard for probability densities
+    cmap = 'viridis'
+    
     # Create figure
     fig = plt.figure(figsize=(ncols * 3.5, nrows * 3.2 + 0.8))
     
     # Title
-    title_lines = []
-    title_lines.append(f"Conditional Density Table: {data_label}")
+    title_lines = [f"Density Table: {data_label}"]
     
     if process is not None:
         if hasattr(process, 'alpha') and process.alpha is not None:
             title_lines.append(
-                f"Process: α={process.alpha:.2f}, c_α={process.c_alpha:.2f}, "
+                f"α={process.alpha:.2f}, c_α={process.c_alpha:.2f}, "
                 f"c₀={process.c_0:.2f}, σ={process.sigma:.2f}, T={process.T:.2f}"
             )
         elif hasattr(process, 'beta') and process.beta is not None:
-            title_lines.append(f"Process: VPOU, β={process.beta:.2f}, T={process.T:.2f}")
+            title_lines.append(f"β={process.beta:.2f}, T={process.T:.2f}")
     
-    title_lines.append(
-        f"Grid: {N_x0}×{N_t}×{N_x} points | "
-        f"x₀∈[{x0_grid[0]:.2f},{x0_grid[-1]:.2f}] | "
-        f"x∈[{x_grid[0]:.2f},{x_grid[-1]:.2f}]"
-    )
+    fig.suptitle('\n'.join(title_lines), fontsize=11)
     
-    fig.suptitle('\n'.join(title_lines), fontsize=11, weight='bold', y=0.98)
-    
-    # Compute global vmin/vmax - use more conservative percentiles to avoid striping
+    # Fixed color scale for density visualization
     if log_scale:
-        # For log scale, use symmetric percentiles
-        vmin, vmax = np.percentile(plot_data, [5, 95])
+        # For log scale: fixed range that works well for log probabilities
+        vmin, vmax = -10.0, 0.0
     else:
-        # For linear scale, use tighter range
-        vmin = 0.0
-        vmax = np.percentile(plot_data, 99)
+        # For linear scale: fixed range for probability densities
+        vmin, vmax = -0.2, 1.2
     
     # Create subplots
     for idx, t_idx in enumerate(time_indices):
-        row = idx // ncols
-        col = idx % ncols
-        
         ax = plt.subplot(nrows, ncols, idx + 1)
         
-        # Get density slice: [N_x0, N_x]
         density_slice = plot_data[:, t_idx, :]
         t_val = t_grid[t_idx]
         
-        # Plot heatmap with 'nearest' interpolation to avoid artifacts
-        im = ax.imshow(
-            density_slice,
-            extent=[x_grid[0], x_grid[-1], x0_grid[0], x0_grid[-1]],
-            origin='lower',
-            aspect='auto',
-            cmap=style,
+        # Use pcolormesh instead of imshow - no aliasing artifacts
+        im = ax.pcolormesh(
+            x_grid, x0_grid, density_slice,
+            cmap=cmap,
             vmin=vmin,
             vmax=vmax,
-            interpolation='nearest'  # Changed from 'bilinear' - eliminates striping!
+            shading='nearest',
         )
         
-        ax.set_xlabel('x (state)', fontsize=9)
-        ax.set_ylabel('x₀ (initial)', fontsize=9)
-        ax.set_title(f't = {t_val:.3f}', fontsize=10, weight='bold', pad=8)
-        ax.tick_params(labelsize=8)
-        ax.grid(True, alpha=0.2, linewidth=0.3)
+        ax.set_xlabel('x')
+        ax.set_ylabel('x₀')
+        ax.set_title(f't = {t_val:.3f}')
     
     # Remove empty subplots
     total_subplots = nrows * ncols
@@ -444,11 +387,10 @@ def plot_density_table_heatmaps(
     # Colorbar
     cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
     cbar = fig.colorbar(im, cax=cbar_ax)
-    cbar.set_label(data_label, fontsize=9, rotation=270, labelpad=20)
-    cbar.ax.tick_params(labelsize=8)
+    cbar.set_label(data_label, rotation=270, labelpad=15)
     
-    plt.subplots_adjust(left=0.06, right=0.90, bottom=0.08, top=0.92, 
-                       wspace=0.35, hspace=0.35)
+    plt.subplots_adjust(left=0.08, right=0.90, bottom=0.08, top=0.92, 
+                       wspace=0.30, hspace=0.30)
     
     out_path = os.path.join(eval_path, "density_table_heatmaps.png")
     fig.savefig(out_path, dpi=dpi)

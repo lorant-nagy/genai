@@ -39,6 +39,18 @@ print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][b
 print("[bold green]---------------------------------------------------------------[/bold green]")
 
 
+from utils.globals import DEVICE, DTYPE
+print(f"[bold blue]Using device:[/] [yellow]{DEVICE}[/], dtype: [yellow]{DTYPE}[/]")
+
+if DEVICE == "cuda":
+    if torch.cuda.is_available():
+        print(f"[bold green]GPU is available: {torch.cuda.get_device_name(0)}[/]")
+    else:
+        print(f"[bold red]GPU is not available, switching to CPU[/]")
+        DEVICE = "cpu"
+
+    
+
 results_dir = config.env.results_dir
 run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
 table_dir = os.path.join(results_dir, "score_tables")

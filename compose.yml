@@ -1,0 +1,32 @@
+services:
+  train:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: genai:dev
+    working_dir: /workspace
+
+    volumes:
+      - ./:/workspace
+      - /data/shared/data:/shared_data:ro
+      - /data/lorantnagy/storage/genai/data:/data_local
+      - /data/lorantnagy/storage/genai/runs:/run_logs
+      - /data/lorantnagy/storage/genai/wandb:/wandb
+
+    env_file:
+      - /home/lorantnagy/.secrets/wandb.env
+
+    environment:
+      - PYTHONPATH=/workspace
+      - DEVICE=${DEVICE:-cuda}
+      - WANDB_DIR=/wandb
+      - WANDB_PROJECT=genai
+      - GENAI_SHARED_DATA=/shared_data
+      - GENAI_DATA=/data_local
+      - GENAI_RUNS=/run_logs
+
+    shm_size: "16gb"
+    tty: true
+    stdin_open: true
+    gpus: all
+    command: ["bash"]

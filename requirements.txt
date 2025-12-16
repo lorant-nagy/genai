@@ -1,0 +1,7 @@
+numpy
+scipy
+matplotlib
+pyyaml
+rich
+wandb
+petname

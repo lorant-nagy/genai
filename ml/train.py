@@ -9,13 +9,16 @@ import sys
 import matplotlib.pyplot as plt
 sys.path.append(os.path.abspath(".."))
 
+import torch
+# Force float32 as default dtype globally
+torch.set_default_dtype(torch.float32)
+
 from utils.config import load_cfg
 from utils.registry import REGISTRY
 
 from ml.eval import eval
 
 from torch.utils.data import DataLoader
-import torch
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
 
@@ -27,6 +30,7 @@ from diff.sde import SuperlinearLangevin
 
 parser = argparse.ArgumentParser(description="Training script")
 parser.add_argument("config", type=str, help="Path to the config file")
+parser.add_argument("--device", type=str, default=None, help="Device: 'cpu', 'cuda:0', 'cuda:1', etc.")
 args = parser.parse_args()
 
 config = load_cfg(args.config)
@@ -38,18 +42,22 @@ print("[bold green]-------------------------------------------------------------
 print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")
 print("[bold green]---------------------------------------------------------------[/bold green]")
 
+# Device: command line overrides environment variable
+if args.device is not None:
+    DEVICE = args.device
+else:
+    from utils.globals import DEVICE
 
-from utils.globals import DEVICE, DTYPE
-print(f"[bold blue]Using device:[/] [yellow]{DEVICE}[/], dtype: [yellow]{DTYPE}[/]")
+# Validate and set device
+if DEVICE.startswith("cuda") and not torch.cuda.is_available():
+    print(f"[bold red]CUDA not available, using CPU[/bold red]")
+    DEVICE = "cpu"
+elif DEVICE.startswith("cuda"):
+    torch.cuda.set_device(DEVICE)
+    print(f"[bold green]GPU: {torch.cuda.get_device_name(DEVICE)}[/bold green]")
 
-if DEVICE == "cuda":
-    if torch.cuda.is_available():
-        print(f"[bold green]GPU is available: {torch.cuda.get_device_name(0)}[/]")
-    else:
-        print(f"[bold red]GPU is not available, switching to CPU[/]")
-        DEVICE = "cpu"
-
-    
+print(f"[bold blue]Device:[/] [yellow]{DEVICE}[/]")
+print(f"[bold blue]Dtype:[/] [yellow]float32[/]")
 
 results_dir = config.env.results_dir
 run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
@@ -86,6 +94,7 @@ model_parameters = config.model.model_params
 model_parameters.in_channels = dataset.C
 
 model = REGISTRY[model_name](**model_parameters.to_dict())
+model = model.to(DEVICE)
 
 # Watch model gradients
 wandb.watch(model, log="all", log_freq=100)
@@ -99,6 +108,7 @@ process_parameters = config.corruption.process_params
 image_space_dim = dataset.C * dataset.H * dataset.W
 
 process_parameters.table_dir = table_dir
+process_parameters.device = DEVICE
 
 # Import the exception class to catch it
 from diff.score_table import ScoreTableNumericalError
@@ -140,6 +150,7 @@ loss_evo = []
 for epoch in range(config.train.n_epochs):
     loss = 0.0
     for c, batch in enumerate(dataloader_train):
+        batch = batch.to(DEVICE)
         corrupted = corruptor(batch)
         score = proc.score(corrupted['x'], batch, corrupted['t'])
         prediction = model(corrupted['x'], corrupted['t'])
@@ -197,7 +208,7 @@ wandb.summary["total_epochs"] = config.train.n_epochs
 
 # evaluate
 print("[bold green]*** STARTING EVALUATION[/bold green]")
-eval(config, model_path, run_dir)
+eval(config, model_path, run_dir, device=DEVICE)
 
 # plots
 plt.figure()

@@ -52,7 +52,7 @@ class SDESolver:
         T  = self.process.T
         dt = (T - t0) / float(n_steps)
         sqrt_dt = dt ** 0.5
-        t_grid = torch.linspace(t0, T, n_steps + 1, device=self.device)
+        t_grid = torch.linspace(t0, T, n_steps + 1, device=self.device, dtype=x0.dtype)
 
         X = torch.empty(n_steps + 1, x0.shape[0], *x0.shape[1:], device=self.device, dtype=x0.dtype)
         X[0] = x0

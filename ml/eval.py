@@ -1,5 +1,9 @@
 from torch.utils.data import DataLoader
 import torch
+
+# Force float32 as default dtype
+torch.set_default_dtype(torch.float32)
+
 import sys
 import os
 import wandb
@@ -26,16 +30,17 @@ from diff.sde import VPOU
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver, ItoProcess
 
-from utils.globals import DEVICE, DTYPE
-
 from rich import print
 
 
-def eval(config, state_dict_path, eval_path):
+def eval(config, state_dict_path, eval_path, device="cpu"):
     print("*** starting evaluation", flush=True)
+    
+    DEVICE = device
 
     dataset_name = config.dataset_eval.dataset_cls
     dataset_parameters = config.dataset_eval.dataset_params
+    dataset_parameters.device = DEVICE
     dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
     dataloader = DataLoader(dataset, **config.dataloader.to_dict())
@@ -84,7 +89,7 @@ def eval(config, state_dict_path, eval_path):
     backward_solver = SDESolver(reverse_sde, integrator)
 
     print(f"-------> creating stationary sampler", flush=True)
-    stationary_sampler = StationarySampler(config, equilibration_factor=5.0)
+    stationary_sampler = StationarySampler(config, device=DEVICE, equilibration_factor=5.0)
 
     print(f"-------> sampling from stationary distribution", flush=True)
     x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))

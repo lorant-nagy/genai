@@ -21,8 +21,9 @@ class TimeEmbedding(nn.Module):
         B = t.shape[0]
         # frequencies: geometric progression like in diffusion/posenc
         device = t.device
+        dtype = t.dtype
         freqs = torch.exp(
-            torch.linspace(math.log(1.0), math.log(1000.0), self.nf, device=device)
+            torch.linspace(math.log(1.0), math.log(1000.0), self.nf, device=device, dtype=dtype)
         )  # (nf,)
         angles = t[:, None] * freqs[None, :]               # (B, nf)
         emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # (B, 2*nf)

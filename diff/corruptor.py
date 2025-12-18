@@ -7,7 +7,7 @@ from diff.sim_core import SDESolver
 from diff.integrator import EulerMaruyama
 from diff.sim_core import Integrator
 
-from utils.globals import DEVICE, DTYPE
+from utils.globals import DEVICE
 
 @dataclass
 class CorruptorConfig:
@@ -52,7 +52,6 @@ class Corruptor:
         self.integrator = integrator
         self.process = process
         self.device = DEVICE
-        self.dtype = DTYPE
         self.return_time_zero_state = return_time_zero_state
 
     @torch.no_grad()
@@ -60,15 +59,12 @@ class Corruptor:
 
         B, C, H, W = images.shape
 
-        device = self.device
-        dtype = self.dtype
-
-        x0 = images.to(device=device)
+        # Images already on correct device from DataLoader
         solver = SDESolver(self.process, self.integrator)
 
         # simulate full trajectory
         t_grid, X = solver.simulate(
-            x0,
+            images,
             n_steps=self.n_steps,
             seed=seed
         )

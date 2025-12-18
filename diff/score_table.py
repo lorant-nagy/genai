@@ -857,6 +857,14 @@ class ScoreInterpolator:
         Returns:
             Conditional scores, shape (B, d)
         """
+        # Defensive: ensure inputs are on the same device as the table
+        if x.device != self.device:
+            x = x.to(self.device)
+        if t.device != self.device:
+            t = t.to(self.device)
+        if x0.device != self.device:
+            x0 = x0.to(self.device)
+        
         B, d = x.shape
         
         # Flatten to (B*d,) for vectorized processing

@@ -8,20 +8,22 @@ from diff.sim_core import SDESolver
 from utils.registry import REGISTRY
 import copy
 
-from utils.globals import DEVICE, DTYPE
+# No globals needed - device passed as parameter
 
 class StationarySampler:
     """
     Sample from stationary distribution by running forward SDE from N(0,1).
     """
     
-    def __init__(self, config, equilibration_factor: float = 5.0):
+    def __init__(self, config, device: str = "cpu", equilibration_factor: float = 5.0):
         """
         Args:
+            config: Configuration object
+            device: Device to use for sampling
             equilibration_factor: Multiply T and n_steps by this factor
         """
         
-        self.device = DEVICE
+        self.device = device
         self.equilibration_factor = equilibration_factor
         
         process_name = config.corruption.process_cls
@@ -58,19 +60,23 @@ def standard_normal_BCHW(batch_size: int, channels: int, height: int, width: int
 def standard_normal_flat(batch_size: int, channels: int, height: int, width: int, device: str = "cpu") -> torch.Tensor:
     return torch.randn((batch_size, channels * height * width), device=device, dtype=torch.get_default_dtype())
 
-def generate_random_side_rectangles(dim = None, num_rectangles=1, revert_color = True, always_center = False, fixed_width_and_height_perc = None):
+def generate_random_side_rectangles(dim=None, num_rectangles=1, revert_color=True, always_center=False, fixed_width_and_height_perc=None, device="cpu"):
     """
     Generate random rectangles with constraints based on distance to nearest sides.
     
     Args:
         dim: Dimension of the output tensor (dim x dim)
         num_rectangles: Number of rectangles to generate (default: 1)
+        revert_color: Invert colors (default: True)
+        always_center: Center the rectangle (default: False)
+        fixed_width_and_height_perc: Fixed percentage for width/height (default: None)
+        device: Device to create tensor on (default: "cpu")
     
     Returns:
         torch.Tensor: (dim, dim) tensor with rectangles marked as 1, background as 0
     """
-    # Initialize empty tensor
-    tensor = torch.zeros(dim, dim)
+    # Initialize empty tensor on specified device
+    tensor = torch.zeros(dim, dim, device=device)
     
     for _ in range(num_rectangles):
         # Step 1: Sample center point

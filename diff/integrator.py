@@ -10,6 +10,10 @@ class Integrator(ABC):
 @register
 class EulerMaruyama(Integrator):
     
+    def __init__(self, **kwargs):
+        """Accept any parameters for compatibility with config system."""
+        pass
+    
     def step(self, process, x: torch.Tensor, t: float, dt: float, dW: torch.Tensor) -> torch.Tensor:
         drift = process.drift(x, t)
         diffusion = process.diffusion(x, t)

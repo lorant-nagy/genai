@@ -55,6 +55,9 @@ class SuperlinearLangevin(ItoProcess):
     Samples from potential U(x) = (c_α/(α+1))|x|^(α+1) + (c_0/2)x^2
     
     Automatically builds or loads conditional score table on initialization.
+    Uses registry system to avoid rebuilding identical tables - tables are
+    identified by a hash of all their parameters and stored in a registry.json.
+    Score table computation is automatically parallelized.
     """
     
     def __init__(
@@ -78,16 +81,28 @@ class SuperlinearLangevin(ItoProcess):
         self.sigma = sigma
         
         self.score_table_obj = None
+        self.score_table_id = None  # Store the ID for reference
         
         if score_table_params is not None:
             if table_dir is None:
-                raise ValueError("path must be provided when score_table_params is given.")
+                raise ValueError("table_dir must be provided when score_table_params is given.")
             
-            # Ensure directory exists
-            os.makedirs(table_dir, exist_ok=True)
-            table_file_path = os.path.join(table_dir, "score_table.pt")
+            # Import registry system
+            from utils.score_table_registry import ScoreTableRegistry
             
-            # Build ScoreTableConfig from the nested dict
+            # Create/load registry
+            registry = ScoreTableRegistry(table_dir)
+            
+            # Get or create table entry (checks for existing matches)
+            table_id, table_path, is_new = registry.get_or_create_table(
+                process=self,
+                score_table_params=score_table_params,
+                description=f"SuperlinearLangevin: α={alpha}, c_α={c_alpha}, c_0={c_0}, σ={sigma}, T={T}"
+            )
+            
+            self.score_table_id = table_id
+            
+            # Build ScoreTableConfig
             score_config = ScoreTableConfig(
                 **score_table_params,
                 alpha=self.alpha,
@@ -95,22 +110,23 @@ class SuperlinearLangevin(ItoProcess):
                 c_0=self.c_0,
                 sigma=self.sigma,
                 T=self.T,
+                t0=self.t0,
             )
             
-            # Load or build
-            if os.path.exists(table_file_path):
-                print(f"Loading score table from {table_file_path}...")
-                self.score_table_obj = ScoreTable.load(table_file_path, self)
-                print("Score table loaded successfully.")
+            # Load or build (parallelization is automatic)
+            if not is_new and table_path.exists():
+                print(f"[green]Loading existing score table (ID: {table_id})[/green]")
+                self.score_table_obj = ScoreTable.load(str(table_path), self)
+                print(f"[green]✓ Score table loaded successfully[/green]")
             else:
-                print(f"Score table not found at {table_file_path}.")
-                print(f"Building score table (this may take a while)...")
+                print(f"[blue]Building new score table (ID: {table_id})[/blue]")
+                print(f"[yellow]This may take a while...[/yellow]")
                 self.score_table_obj = build_score_table(
                     self, 
                     score_config, 
-                    save_path=table_file_path
+                    save_path=str(table_path)
                 )
-                print(f"Score table built and saved to {table_file_path}.")
+                print(f"[green]✓ Score table built and saved[/green]")
     
     def drift(self, x: torch.Tensor, t: float) -> torch.Tensor:
         power_term = torch.pow(torch.abs(x), self.alpha) * torch.sign(x)

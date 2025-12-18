@@ -7,8 +7,6 @@ from diff.sim_core import SDESolver
 from diff.integrator import EulerMaruyama
 from diff.sim_core import Integrator
 
-from utils.globals import DEVICE
-
 @dataclass
 class CorruptorConfig:
     n_steps: int
@@ -51,7 +49,6 @@ class Corruptor:
         self.per_sample_time = per_sample_time
         self.integrator = integrator
         self.process = process
-        self.device = DEVICE
         self.return_time_zero_state = return_time_zero_state
 
     @torch.no_grad()

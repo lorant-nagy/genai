@@ -5,8 +5,6 @@ import torch
 from torch.utils.data import Dataset
 from utils.registry import register
 
-from utils.globals import DEVICE
-
 from diff.samplers import generate_random_side_rectangles
 
 @register
@@ -23,6 +21,7 @@ class RectanglesDataset(Dataset):
         W: int,
         always_center: bool = True,
         fixed_width_and_height_perc: Optional[float] = None,
+        device: str = "cpu",  # Add device parameter with default
         **kwargs,
     ):
         self.C = C
@@ -31,7 +30,7 @@ class RectanglesDataset(Dataset):
         self.sampler = generate_random_side_rectangles
         self.length = 128*16
         self.ddim = H
-        self.device = DEVICE
+        self.device = device  # Use parameter instead of global
         self.always_center = always_center
         self.fixed_width_and_height_perc = fixed_width_and_height_perc
 

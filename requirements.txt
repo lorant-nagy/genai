@@ -5,3 +5,4 @@ pyyaml
 rich
 wandb
 petname
+joblib

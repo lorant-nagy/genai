@@ -84,6 +84,7 @@ wandb.init(
 
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
+dataset_parameters.device = DEVICE  # Pass device to dataset
 
 dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 

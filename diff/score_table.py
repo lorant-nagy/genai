@@ -60,6 +60,7 @@ class ScoreTableConfig:
     c_0: float = 0.5
     sigma: float = 1.0
     T: float = 1.0
+    t0: float = 0.0  # Add t0
     
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -77,7 +78,8 @@ class ScoreTableConfig:
             abs(self.c_alpha - process.c_alpha) < 1e-6 and
             abs(self.c_0 - process.c_0) < 1e-6 and
             abs(self.sigma - process.sigma) < 1e-6 and
-            abs(self.T - process.T) < 1e-6
+            abs(self.T - process.T) < 1e-6 and
+            abs(self.t0 - process.t0) < 1e-6
         )
 
 
@@ -98,6 +100,7 @@ class PDESolver1D:
         t_grid: torch.Tensor,
         config: ScoreTableConfig,
         device: str = "cpu",
+        quiet: bool = False,
     ):
         """
         Args:
@@ -107,6 +110,7 @@ class PDESolver1D:
             t_grid: Time grid (N_t,)
             config: Score table configuration
             device: torch device
+            quiet: If True, suppress CFL number print
         """
         self.g_scal = g_scal
         self.sigma = sigma
@@ -122,14 +126,11 @@ class PDESolver1D:
         # Check CFL condition for stability
         max_drift = torch.abs(self.g_scal(self.x_grid)).max().item()
         cfl = (max_drift * self.dt) / self.dx
-        if cfl > 0.25:  # Stricter criterion to prevent oscillations
-            # warnings.warn(
-            #     f"CFL number {cfl:.3f} is too large for stability. "
-            #     f"Reduce dt or increase N_x. Recommended: CFL < 0.25"
-            # )
-            print(f"[red] CFL number: {cfl:.3f} [/red]")
-        else:
-            print(f"[green]CFL number: {cfl:.3f} [/green]")
+        if not quiet:  # Only print if not quiet
+            if cfl > 0.25:  # Stricter criterion to prevent oscillations
+                print(f"[red] CFL number: {cfl:.3f} [/red]")
+            else:
+                print(f"[green]CFL number: {cfl:.3f} [/green]")
     
     def _initialize_delta_approx(self, x0: float) -> torch.Tensor:
         """
@@ -583,8 +584,13 @@ class ScoreTable:
         """
         Build the score table by solving PDE for each x0.
         
+        Uses parallel computation automatically (all available CPUs).
+        
         This is the main computational routine. Progress is printed.
         """
+        # Hardcoded: use all CPUs for parallel computation
+        n_workers = -1
+        
         print(f"Building score table:")
         print(f"  Grid: {self.config.N_x0} x {self.config.N_t} x {self.config.N_x}")
         print(f"  Domain: x0 ∈ [{self.config.x0_min}, {self.config.x0_max}]")
@@ -615,12 +621,74 @@ class ScoreTable:
             device=self.device,
         )
         
-        # Solve for each x0
-        for k, x0_k in enumerate(self.x0_grid):
-            if (k + 1) % max(1, self.config.N_x0 // 10) == 0:
-                print(f"  Solving for x0[{k+1}/{self.config.N_x0}]...", flush=True)
-            
-            p_table[k] = pde_solver.solve(x0_k.item())
+        # Decide parallel vs sequential
+        use_parallel = n_workers != 1 and self.config.N_x0 > 10
+        
+        if use_parallel:
+            # PARALLEL COMPUTATION
+            try:
+                from joblib import Parallel, delayed
+                
+                # Determine actual number of workers
+                if n_workers == -1:
+                    import multiprocessing
+                    n_workers_actual = multiprocessing.cpu_count()
+                else:
+                    n_workers_actual = n_workers
+                
+                print(f"  Using parallel computation ({n_workers_actual} workers)")
+                
+                # Move to CPU if needed (for pickling)
+                original_device = self.device
+                if self.device != 'cpu':
+                    print("  Moving solver to CPU for parallel computation...")
+                    pde_solver = PDESolver1D(
+                        g_scal=g_scal,
+                        sigma=self.process.sigma,
+                        x_grid=self.x_grid.cpu(),
+                        t_grid=self.t_grid.cpu(),
+                        config=self.config,
+                        device='cpu',
+                        quiet=True,  # Suppress duplicate CFL print
+                    )
+                
+                def solve_one(k, x0_val):
+                    """Solve PDE for one x0 value."""
+                    return k, pde_solver.solve(x0_val)
+                
+                # Parallel execution with progress
+                results = Parallel(n_jobs=n_workers_actual, verbose=5)(
+                    delayed(solve_one)(k, x0_k.item()) 
+                    for k, x0_k in enumerate(self.x0_grid.cpu() if original_device != 'cpu' else self.x0_grid)
+                )
+                
+                # Collect results
+                for k, p_k in results:
+                    # Handle both Tensor and numpy array returns
+                    if isinstance(p_k, torch.Tensor):
+                        p_table[k] = p_k
+                    elif hasattr(p_k, '__array__'):
+                        p_table[k] = torch.from_numpy(p_k)
+                    else:
+                        p_table[k] = p_k
+                
+                # Move back to original device if needed
+                if original_device != 'cpu':
+                    print(f"  Moving results back to {original_device}...")
+                    p_table = p_table.to(original_device)
+                
+            except ImportError:
+                print("  Warning: joblib not available, falling back to sequential")
+                use_parallel = False
+        
+        if not use_parallel:
+            # SEQUENTIAL COMPUTATION (original)
+            print("  Using sequential computation")
+            for k, x0_k in enumerate(self.x0_grid):
+                if (k + 1) % max(1, self.config.N_x0 // 10) == 0:
+                    print(f"  Solving for x0[{k+1}/{self.config.N_x0}]...", flush=True)
+                
+                p_table[k] = pde_solver.solve(x0_k.item())
         
         # Check density table
         if torch.isnan(p_table).any():
@@ -680,6 +748,17 @@ class ScoreTable:
             print(f"  Including density table in save (adds ~{size_mb:.1f} MB)")
         
         torch.save(save_dict, path)
+        
+        # Fix permissions so file is deletable (handles Docker/root ownership issues)
+        try:
+            os.chmod(path, 0o664)  # rw-rw-r--
+            # Also fix parent directory permissions
+            parent_dir = os.path.dirname(path)
+            if parent_dir:
+                os.chmod(parent_dir, 0o775)  # rwxrwxr-x
+        except Exception:
+            # Don't fail if we can't change permissions
+            pass
     
     @classmethod
     def load(cls, path: str, process) -> ScoreTable:
@@ -890,7 +969,18 @@ def build_score_table(
     save_path: Optional[str] = None,
     save_density: bool = True
 ) -> ScoreTable:
+    """
+    Build a score table with automatic parallelization.
     
+    Args:
+        process: Process instance
+        config: Score table configuration
+        save_path: Optional path to save the table
+        save_density: Whether to save density table (default: True)
+    
+    Returns:
+        Built ScoreTable instance
+    """
     table = ScoreTable(process, config, device=process.device)
     table.build()
     

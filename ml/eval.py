@@ -94,7 +94,7 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
     print(f"-------> sampling from stationary distribution", flush=True)
     x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
 
-    n_steps = config.eval.n_steps
+    n_steps = config.corruption.corruptor_params.n_steps
     print(f"-------> simulating backward trajectories {n_samples} samples with {n_steps} steps", flush=True)
     with torch.inference_mode():
         t_grid, X = backward_solver.simulate(

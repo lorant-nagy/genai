@@ -46,11 +46,17 @@ class StationarySampler:
     def __call__(self, shape: tuple) -> torch.Tensor:
         """
         Sample from stationary distribution.
+        
+        Uses random seed each time to ensure diverse samples.
         """
+        # Generate random seed for this call to ensure diversity
+        import random
+        seed = random.randint(0, 2**32 - 1)
+        
         # Start from N(0, 1)
         x0 = torch.randn(shape, device=self.device)
         with torch.no_grad():
-            t_grid, X = self.solver.simulate(x0, n_steps=self.n_steps)
+            t_grid, X = self.solver.simulate(x0, n_steps=self.n_steps, seed=seed)
         return X[-1]
 
 

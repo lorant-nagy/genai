@@ -1,36 +1,67 @@
-# rectangles_dataset.py
-from dataclasses import dataclass
-from typing import Callable, Optional, Dict
+"""
+Dataset classes for training diffusion models.
+
+All datasets follow the same interface:
+- Return tensors of shape (C, H, W) in float32
+- Have .C, .H, .W attributes for model configuration
+- Accept a normalizer instance for data transformation
+- Accept device parameter for tensor placement
+"""
+
+from __future__ import annotations
+from pathlib import Path
+from typing import Optional
+import re
+
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-from utils.registry import register
+from PIL import Image
 
+from utils.registry import register
+from ml.normalizer import Normalizer
 from diff.samplers import generate_random_side_rectangles
+
 
 @register
 class RectanglesDataset(Dataset):
     """
+    Synthetic dataset generating random rectangles.
+    
     Returns (C,H,W) with C=1 from a sampler that yields (H,W).
-    Data is normalized to [-1, 1] range.
+    Uses normalizer for data transformation.
     Always uses float32 for model compatibility.
+    
+    Args:
+        normalizer: Normalizer instance for data transformation
+        C: Number of channels (always 1 for rectangles)
+        H: Image height
+        W: Image width
+        always_center: If True, rectangles are always centered
+        fixed_width_and_height_perc: If provided, use fixed size rectangles
+        device: Device to create tensors on
+        length: Number of samples in epoch (default: 2048)
     """
     def __init__(
         self,
+        normalizer: Normalizer,
         C: int,
         H: int,
         W: int,
         always_center: bool = True,
         fixed_width_and_height_perc: Optional[float] = None,
-        device: str = "cpu",  # Add device parameter with default
+        device: str = "cpu",
+        length: int = 128 * 16,
         **kwargs,
     ):
+        self.normalizer = normalizer
         self.C = C
         self.H = H
         self.W = W
+        self.device = device
         self.sampler = generate_random_side_rectangles
-        self.length = 128*16
+        self.length = length
         self.ddim = H
-        self.device = device  # Use parameter instead of global
         self.always_center = always_center
         self.fixed_width_and_height_perc = fixed_width_and_height_perc
 
@@ -39,6 +70,7 @@ class RectanglesDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         # Sampler creates tensors with default dtype (float32)
+        # Returns values in {0, 1}
         img = self.sampler(
             self.ddim, 
             always_center=self.always_center, 
@@ -47,7 +79,170 @@ class RectanglesDataset(Dataset):
         )
         img = img.unsqueeze(0)  # (H,W) -> (1,H,W)
         
-        # Sampler returns {0, 1}, we map to {-1, 1}
-        img = 2.0 * img - 1.0
+        # Apply normalizer (replaces hardcoded 2.0 * img - 1.0)
+        img = self.normalizer.normalize(img)
         
         return img
+
+
+@register
+class PokemonSpritesDataset(Dataset):
+    """
+    Dataset for Pokemon sprite images.
+    
+    Loads Pokemon sprites from a preprocessed directory created by
+    tools/prepare_pokemon_sprites.py. Returns RGB images as (3,H,W) tensors.
+    
+    Args:
+        normalizer: Normalizer instance for data transformation
+        data_root: Path to preprocessed dataset (contains images/ and index.csv)
+        image_size: Size to resize images to (height and width)
+        device: Device to create tensors on
+        max_items: Maximum number of images to load (None = all)
+        pokedex_id: Filter to specific Pokemon by Pokedex ID (None = all)
+        keep_shiny: Filter by shiny status (None=both, True=only shiny, False=only regular)
+        interpolation: Resampling method ('nearest' for pixel art, 'bilinear' for smooth)
+    
+    Example:
+        >>> normalizer = MinusOnePlusOneNormalizer()
+        >>> dataset = PokemonSpritesDataset(
+        ...     normalizer=normalizer,
+        ...     data_root="/data/pokemon_sprites_parsed",
+        ...     image_size=96
+        ... )
+        >>> img = dataset[0]  # Returns (3, 96, 96) tensor in normalized range
+    """
+    
+    def __init__(
+        self,
+        normalizer: Normalizer,
+        data_root: str,
+        image_size: int = 96,
+        device: str = "cpu",
+        max_items: Optional[int] = None,
+        pokedex_id: Optional[int] = None,
+        keep_shiny: Optional[bool] = None,
+        interpolation: str = "nearest",
+        **kwargs,
+    ):
+        self.normalizer = normalizer
+        self.device = device
+        self.C = 3  # RGB
+        self.H = image_size
+        self.W = image_size
+        
+        # Setup resampling method
+        if interpolation == "nearest":
+            self._resample = Image.Resampling.NEAREST
+        elif interpolation == "bilinear":
+            self._resample = Image.Resampling.BILINEAR
+        else:
+            raise ValueError(
+                f"interpolation must be 'nearest' or 'bilinear', got '{interpolation}'"
+            )
+        
+        # Validate data_root
+        root = Path(data_root).expanduser().resolve()
+        img_dir = root / "images"
+        if not img_dir.exists():
+            raise FileNotFoundError(
+                f"PokemonSpritesDataset: images directory not found: {img_dir}\n"
+                f"Did you run tools/prepare_pokemon_sprites.py first?"
+            )
+        
+        # Find all images
+        exts = (".png", ".jpg", ".jpeg", ".webp")
+        paths = []
+        for p in img_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in exts:
+                # Skip __MACOSX files
+                if "__MACOSX" not in str(p):  # ADD THIS LINE
+                    paths.append(p)
+        
+        if len(paths) == 0:
+            raise RuntimeError(
+                f"PokemonSpritesDataset: no images found in {img_dir}"
+            )
+        
+        # Optional filtering by Pokedex ID (best-effort based on filename)
+        if pokedex_id is not None:
+            want = int(pokedex_id)
+            filtered = []
+            for p in paths:
+                m = re.search(r"(?<!\d)(\d{1,4})(?!\d)", p.stem)
+                if m and int(m.group(1)) == want:
+                    filtered.append(p)
+            
+            if len(filtered) == 0:
+                raise ValueError(
+                    f"PokemonSpritesDataset: no images found for Pokedex ID {pokedex_id}"
+                )
+            
+            paths = filtered
+            print(f"Filtered to Pokedex ID {pokedex_id}: {len(paths)} images")
+        
+        # Optional filtering by shiny status (best-effort based on filename)
+        if keep_shiny is not None:
+            filtered = []
+            for p in paths:
+                s = str(p).lower()
+                is_shiny = ("shiny" in s) or ("_shiny" in s) or ("-shiny" in s)
+                if bool(is_shiny) == bool(keep_shiny):
+                    filtered.append(p)
+            
+            if len(filtered) == 0:
+                shiny_str = "shiny" if keep_shiny else "non-shiny"
+                raise ValueError(
+                    f"PokemonSpritesDataset: no {shiny_str} images found"
+                )
+            
+            paths = filtered
+            shiny_str = "shiny" if keep_shiny else "regular"
+            print(f"Filtered to {shiny_str} sprites: {len(paths)} images")
+        
+        # Sort for deterministic ordering
+        paths = sorted(paths)
+        
+        # Limit number of items
+        if max_items is not None:
+            paths = paths[:int(max_items)]
+            print(f"Limited to {max_items} images")
+        
+        self.paths = paths
+        
+        print(f"PokemonSpritesDataset initialized:")
+        print(f"  - Data root: {root}")
+        print(f"  - Total images: {len(self.paths)}")
+        print(f"  - Image size: {self.H}x{self.W}")
+        print(f"  - Channels: {self.C} (RGB)")
+        print(f"  - Interpolation: {interpolation}")
+    
+    def __len__(self) -> int:
+        return len(self.paths)
+    
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        """
+        Load and preprocess image.
+        
+        Returns:
+            Tensor of shape (3, H, W) in normalized range (depends on normalizer)
+        """
+        path = self.paths[idx]
+        
+        # Load image as RGB
+        img = Image.open(path).convert("RGB")
+        
+        # Resize if needed
+        if img.size != (self.W, self.H):
+            img = img.resize((self.W, self.H), resample=self._resample)
+        
+        # Convert to numpy array in [0, 1] range
+        arr = np.asarray(img, dtype=np.float32) / 255.0  # (H, W, 3)
+        
+        # Convert to torch tensor (C, H, W)
+        x = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+        
+        # Apply normalizer
+        x = self.normalizer.normalize(x)
+        
+        return x.to(dtype=torch.float32)

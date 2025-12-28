@@ -15,6 +15,8 @@ torch.set_default_dtype(torch.float32)
 
 from utils.config import load_cfg
 from utils.registry import REGISTRY
+from utils.viz import generate_samples
+from utils.viz import get_data_samples
 
 from ml.eval import eval
 
@@ -59,6 +61,13 @@ elif DEVICE.startswith("cuda"):
 print(f"[bold blue]Device:[/] [yellow]{DEVICE}[/]")
 print(f"[bold blue]Dtype:[/] [yellow]float32[/]")
 
+# Get visualization config
+viz_every = getattr(config.train, 'visualize_every', None)
+if viz_every is not None and viz_every > 0:
+    print(f"[bold blue]Visualization:[/] [yellow]Every {viz_every} epochs[/]")
+else:
+    print(f"[bold blue]Visualization:[/] [yellow]Disabled[/]")
+
 results_dir = config.env.results_dir
 run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
 table_dir = os.path.join(results_dir, "score_tables")
@@ -82,11 +91,24 @@ wandb.init(
         tags=[config.corruption.process_cls, config.model.cls] + getattr(wandb_config, 'tags', [])
     )
 
+# Create normalizer first
+normalizer_name = config.dataset_train.normalizer_cls
+normalizer_parameters = config.dataset_train.normalizer_params
+normalizer = REGISTRY[normalizer_name](**normalizer_parameters.to_dict())
+
+# Create dataset with normalizer
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
-dataset_parameters.device = DEVICE  # Pass device to dataset
+dataset_parameters.device = DEVICE
+dataset_parameters.normalizer = normalizer  # Pass normalizer instance
 
 dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
+
+# Fit normalizer if needed (e.g., for data-dependent statistics)
+if normalizer.needs_fitting:
+    print(f"[bold yellow]Fitting normalizer to dataset...[/bold yellow]")
+    normalizer.fit(dataset)
+    print(f"[bold green]Normalizer fitted successfully[/bold green]")
 
 dataloader_train = DataLoader(dataset, **config.dataloader.to_dict())
 
@@ -143,11 +165,20 @@ print(f"-- optimizer: {optimizer_name}")
 print(f"-- loss: {config.loss.cls}")
 print(f"-- training for {config.train.n_epochs} epochs")
 
+# Log initial data samples if visualization is enabled
+if viz_every is not None and viz_every > 0:
+    
+    data_img = get_data_samples(dataloader_train, normalizer, n_samples=9)
+    if data_img:
+        wandb.log({"data_samples": data_img, "epoch": 0})
+        print("[cyan]Initial data samples → logged[/cyan]")
+
 print(f"[bold green]*** TRAINING STARTED[/bold green]")
 best_model = None
 best_loss = float('inf')
 average_loss_per_sample = 0.0
 loss_evo = []
+
 for epoch in range(config.train.n_epochs):
     loss = 0.0
     for c, batch in enumerate(dataloader_train):
@@ -169,15 +200,46 @@ for epoch in range(config.train.n_epochs):
         print(f"batch {c+1}/{len(dataloader_train)}", end="\r", flush=True)
     
     average_loss_per_sample = loss.item()/len(dataloader_train)
-    print(f"Epoch {epoch+1}/{config.train.n_epochs} || Loss: {average_loss_per_sample:.6f}", flush=True)
+    
+    # Build epoch message
+    epoch_msg = f"Epoch {epoch+1}/{config.train.n_epochs} || Loss: {average_loss_per_sample:.6f}"
+    
+    # Check if we should generate samples
+    should_visualize = viz_every is not None and viz_every > 0 and ((epoch + 1) % viz_every == 0 or (epoch + 1) == 1)
+    
+    if should_visualize:
+        epoch_msg += " → [magenta]generating samples...[/magenta]"
+    
+    print(epoch_msg, flush=True)
+    
     loss_evo.append(average_loss_per_sample)
     
     # Log to wandb
-    wandb.log({
+    log_dict = {
         "epoch": epoch + 1,
         "epoch_loss": average_loss_per_sample,
         "best_loss": best_loss
-    })
+    }
+    
+    # Generate and add samples if needed
+    if should_visualize:
+        sample_img = generate_samples(
+            model=model,
+            process=proc,
+            integrator=integrator,
+            normalizer=normalizer,
+            config=config,
+            dataset=dataset,
+            device=DEVICE,
+            n_samples=9,
+            n_steps=100  # Quick sampling for speed
+        )
+        if sample_img:
+            log_dict["generated_samples"] = sample_img
+        else:
+            print(f"                                → [red]sample generation failed[/red]", flush=True)
+    
+    wandb.log(log_dict)
     
     # Check if this is the best model (handles NaN/Inf properly)
     if not (torch.isnan(torch.tensor(average_loss_per_sample)) or 

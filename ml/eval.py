@@ -38,10 +38,23 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
     
     DEVICE = device
 
+    # Create normalizer first
+    normalizer_name = config.dataset_eval.normalizer_cls
+    normalizer_parameters = config.dataset_eval.normalizer_params
+    normalizer = REGISTRY[normalizer_name](**normalizer_parameters.to_dict())
+
+    # Create dataset with normalizer
     dataset_name = config.dataset_eval.dataset_cls
     dataset_parameters = config.dataset_eval.dataset_params
     dataset_parameters.device = DEVICE
+    dataset_parameters.normalizer = normalizer
     dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
+
+    # Fit normalizer if needed (should already be fitted from training, but just in case)
+    if normalizer.needs_fitting:
+        print(f"[bold yellow]Fitting normalizer to dataset...[/bold yellow]")
+        normalizer.fit(dataset)
+        print(f"[bold green]Normalizer fitted[/bold green]")
 
     dataloader = DataLoader(dataset, **config.dataloader.to_dict())
 
@@ -103,25 +116,29 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
                 )
 
     print(f"-------> plotting", flush=True)
-    X_img = X
+    
+    # Get visualization range from normalizer
+    vmin, vmax = normalizer.get_visualization_range()
+    
+    # Determine colormap (grayscale for C=1, none for RGB)
+    cmap = "gray" if dataset.C == 1 else None
 
-    X_img_denorm = (X_img + 1.0) / 2.0  # [-1, 1] → [0, 1]
-
-    batch_of_data_denorm = (batch_of_images + 1.0) / 2.0  # [-1, 1] → [0, 1]
-
-    # Plot corruption and samples
+    # Plot corruption and samples (normalizer handles denormalization)
     plot_corruption_and_samples(
         corruptor=corruptor,
-        batch_of_data=batch_of_data_denorm,
+        batch_of_data=batch_of_images,  # Pass normalized data
         eval_path=eval_path,
-        cmap="gray",
+        normalizer=normalizer,  # NEW: pass normalizer for denormalization
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
         max_trajectories=5,
         sample_grid_count=9,
         show_time_header=True,
         mark_t0_indices=True,
         label_data_sample_indices=True,
         t_grid=t_grid,
-        X=X_img_denorm[:, :9],
+        X=X[:, :9],  # Pass normalized data
         n_time_cols=10,
     )
 

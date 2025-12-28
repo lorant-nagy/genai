@@ -18,12 +18,31 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
-def _as_imshow_img(arr: np.ndarray, cmap: Optional[str], vmin: float, vmax: float) -> Tuple[np.ndarray, dict]:
+def _as_imshow_img(
+    arr: np.ndarray,
+    cmap: Optional[str],
+    vmin: float,
+    vmax: float,
+    normalizer=None,  # NEW: optional normalizer for denormalization
+) -> Tuple[np.ndarray, dict]:
     """
     Return (img, kwargs) suitable for plt.imshow, handling gray/RGB(A) and (C,H,W)/(H,W,C).
-    For single-channel images we pass cmap/vmin/vmax; for color images we let matplotlib choose.
+    
+    Args:
+        arr: Input array (numpy or torch tensor)
+        cmap: Colormap for grayscale images
+        vmin, vmax: Value range for grayscale images
+        normalizer: Optional Normalizer instance for denormalization
+    
+    Returns:
+        Tuple of (image_array, imshow_kwargs)
     """
     arr = _to_numpy(arr)
+    
+    # Denormalize if normalizer provided
+    if normalizer is not None:
+        arr_torch = torch.from_numpy(arr)
+        arr = normalizer.denormalize(arr_torch).cpu().numpy()
 
     if arr.ndim == 2:
         return arr, {"cmap": cmap, "vmin": vmin, "vmax": vmax}
@@ -32,22 +51,31 @@ def _as_imshow_img(arr: np.ndarray, cmap: Optional[str], vmin: float, vmax: floa
         if arr.shape[0] in (1, 3, 4):
             if arr.shape[0] == 1:
                 return arr[0], {"cmap": cmap, "vmin": vmin, "vmax": vmax}
-            return np.moveaxis(arr, 0, -1), {}
+            # RGB/RGBA: move channels to last dimension
+            img = np.moveaxis(arr, 0, -1)
+            # Ensure [0,1] range for matplotlib (clip after denormalization)
+            img = np.clip(img, 0.0, 1.0)
+            return img, {}
         # (H,W,C)
         if arr.shape[-1] in (1, 3, 4):
             if arr.shape[-1] == 1:
                 return arr[..., 0], {"cmap": cmap, "vmin": vmin, "vmax": vmax}
-            return arr, {}
+            # RGB/RGBA already in correct format
+            img = np.clip(arr, 0.0, 1.0)
+            return img, {}
     squeezed = np.squeeze(arr)
     if squeezed.ndim in (2, 3):
-        return _as_imshow_img(squeezed, cmap, vmin, vmax)
+        return _as_imshow_img(squeezed, cmap, vmin, vmax, normalizer)
     raise ValueError(f"Unsupported image shape for imshow: {arr.shape}")
 
 
-def _save_samples_strip(samples, out_path, *, cmap, vmin, vmax, dpi, annotate: bool) -> None:
+def _save_samples_strip(samples, out_path, *, cmap, vmin, vmax, dpi, annotate: bool, normalizer=None) -> None:
     """
     Save a 1xN strip (zero margins) with optional index labels.
     Used for BOTH data_samples.png and backward_final_samples.png to ensure identical styling.
+    
+    Args:
+        normalizer: Optional Normalizer instance for denormalization
     """
     n = len(samples)
     if n <= 0:
@@ -58,7 +86,7 @@ def _save_samples_strip(samples, out_path, *, cmap, vmin, vmax, dpi, annotate: b
 
     for i in range(n):
         ax = axs[i]
-        img_show, imshow_kwargs = _as_imshow_img(samples[i], cmap=cmap, vmin=vmin, vmax=vmax)
+        img_show, imshow_kwargs = _as_imshow_img(samples[i], cmap=cmap, vmin=vmin, vmax=vmax, normalizer=normalizer)
         ax.imshow(img_show, **imshow_kwargs)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_frame_on(False)
         if annotate:
@@ -90,12 +118,15 @@ def _linspace_indices(T: int, target_cols: int, reverse: bool = False) -> np.nda
 
 
 def _plot_grid_with_header(
-    images, times, out_path, *, cmap, vmin, vmax, dpi, annotate_first_col: bool, index_fmt: str
+    images, times, out_path, *, cmap, vmin, vmax, dpi, annotate_first_col: bool, index_fmt: str, normalizer=None
 ) -> None:
     """
     images: list-of-lists shape [rows][cols], each leaf is (H,W) or (C,H,W) or (H,W,C)
     times:  1D array-like of length cols
     Saves a no-margin grid with a thin header row listing t-values per column.
+    
+    Args:
+        normalizer: Optional Normalizer instance for denormalization
     """
     # Treat images as pure lists to avoid object-dtype arrays.
     rows = len(images)
@@ -129,7 +160,7 @@ def _plot_grid_with_header(
         for c in range(cols):
             ax = img_axes[r, c]
             cell = images[r][c]          # keep as list indexing, not numpy object array indexing
-            img_show, imshow_kwargs = _as_imshow_img(cell, cmap=cmap, vmin=vmin, vmax=vmax)
+            img_show, imshow_kwargs = _as_imshow_img(cell, cmap=cmap, vmin=vmin, vmax=vmax, normalizer=normalizer)
             ax.imshow(img_show, **imshow_kwargs)
             ax.set_xticks([]); ax.set_yticks([]); ax.set_frame_on(False)
             if annotate_first_col and c == 0:
@@ -403,6 +434,7 @@ def plot_corruption_and_samples(
     batch_of_data: torch.Tensor,
     eval_path: str,
     *,
+    normalizer=None,  # NEW: optional normalizer for denormalization
     cmap: str = "gray",
     max_trajectories: int = 5,
     sample_grid_count: int = 9,
@@ -425,6 +457,10 @@ def plot_corruption_and_samples(
       3) reverse_evolution.png         — reverse-time grid using (t_grid, X) if provided
       4) backward_final_samples.png    — 1xN strip of reverse terminal samples; styled EXACTLY like #2
 
+    Args:
+        normalizer: Optional Normalizer instance. If provided, denormalizes data before plotting.
+                   Otherwise expects data already in visualization range [vmin, vmax].
+    
     Notes
     -----
     * This function performs no heavy computation beyond a single `corruptor(batch_of_data)` call.
@@ -452,6 +488,7 @@ def plot_corruption_and_samples(
         out_path=os.path.join(eval_path, "corruption_trajectories.png"),
         cmap=cmap, vmin=vmin, vmax=vmax, dpi=dpi,
         annotate_first_col=mark_t0_indices, index_fmt="{idx}",
+        normalizer=normalizer,  # Pass normalizer
     )
 
     n_show = int(min(sample_grid_count, batch_of_data.shape[0]))
@@ -463,6 +500,7 @@ def plot_corruption_and_samples(
             os.path.join(eval_path, "data_samples.png"),
             cmap=cmap, vmin=vmin, vmax=vmax, dpi=dpi,
             annotate=label_data_sample_indices,
+            normalizer=normalizer,  # Pass normalizer
         )
 
     if (t_grid is not None) and (X is not None):
@@ -483,6 +521,7 @@ def plot_corruption_and_samples(
             out_path=os.path.join(eval_path, "reverse_evolution.png"),
             cmap=cmap, vmin=vmin, vmax=vmax, dpi=dpi,
             annotate_first_col=mark_t0_indices, index_fmt="{idx}",
+            normalizer=normalizer,  # Pass normalizer
         )
 
         earliest_idx = int(np.argmin(t_np))
@@ -496,4 +535,5 @@ def plot_corruption_and_samples(
                 os.path.join(eval_path, "backward_final_samples.png"),
                 cmap=cmap, vmin=vmin, vmax=vmax, dpi=dpi,
                 annotate=label_data_sample_indices,   # identical styling to data_samples.png
+                normalizer=normalizer,  # Pass normalizer
             )

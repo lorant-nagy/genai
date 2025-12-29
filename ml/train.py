@@ -44,11 +44,12 @@ print("[bold green]-------------------------------------------------------------
 print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")
 print("[bold green]---------------------------------------------------------------[/bold green]")
 
-# Device: command line overrides environment variable
+# FIX #1: Device handling - read from env or command line
 if args.device is not None:
     DEVICE = args.device
 else:
-    from utils.globals import DEVICE
+    # Read from environment variable with fallback to auto-detect
+    DEVICE = os.environ.get('DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
 
 # Validate and set device
 if DEVICE.startswith("cuda") and not torch.cuda.is_available():
@@ -91,15 +92,17 @@ wandb.init(
         tags=[config.corruption.process_cls, config.model.cls] + getattr(wandb_config, 'tags', [])
     )
 
-# Create normalizer first
+
+# Create normalizer
 normalizer_name = config.dataset_train.normalizer_cls
 normalizer_parameters = config.dataset_train.normalizer_params
 normalizer = REGISTRY[normalizer_name](**normalizer_parameters.to_dict())
 
-# Create dataset with normalizer
+# Create dataset 
 dataset_name = config.dataset_train.dataset_cls
 dataset_parameters = config.dataset_train.dataset_params
-dataset_parameters.device = DEVICE
+# FIX #3: Remove device parameter - datasets now always create on CPU
+# dataset_parameters.device = DEVICE  # REMOVED
 dataset_parameters.normalizer = normalizer  # Pass normalizer instance
 
 dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
@@ -180,14 +183,19 @@ average_loss_per_sample = 0.0
 loss_evo = []
 
 for epoch in range(config.train.n_epochs):
-    loss = 0.0
+    # FIX #4: Use Python float for loss accumulation
+    loss_sum = 0.0  # Changed from loss = 0.0 (tensor accumulation)
+    
     for c, batch in enumerate(dataloader_train):
         batch = batch.to(DEVICE)
         corrupted = corruptor(batch)
         score = proc.score(corrupted['x'], batch, corrupted['t'])
         prediction = model(corrupted['x'], corrupted['t'])
         output = loss_fn(prediction, score)
-        loss += output
+        
+        # FIX #4: Accumulate scalar, not tensor
+        loss_sum += output.item()  # Extract scalar immediately
+        
         output.backward()
         optimizer.step()
         optimizer.zero_grad()
@@ -199,7 +207,8 @@ for epoch in range(config.train.n_epochs):
         
         print(f"batch {c+1}/{len(dataloader_train)}", end="\r", flush=True)
     
-    average_loss_per_sample = loss.item()/len(dataloader_train)
+    # FIX #4: loss_sum is already a Python float
+    average_loss_per_sample = loss_sum / len(dataloader_train)
     
     # Build epoch message
     epoch_msg = f"Epoch {epoch+1}/{config.train.n_epochs} || Loss: {average_loss_per_sample:.6f}"

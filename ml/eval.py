@@ -189,5 +189,23 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
         else:
             print(f"  ✗ Skipped {key} (file not found)")
             
+    
+    if hasattr(config.eval, 'test') and config.eval.test:
+        from utils.tests import test_stationary_recovery
+        
+        print(f"\n[bold cyan]-------> running stationary recovery test[/bold cyan]", flush=True)
+        
+        test_stationary_recovery(
+            x0=x0,
+            x_final=X[-1],
+            config=config,
+            save_dir=eval_path,
+            device=DEVICE
+        )
+        
+        print(f"[bold yellow]Test complete. Training will NOT continue (test mode).[/bold yellow]")
+    
 
+
+    wandb.run.log({}, commit=True)
     print("*** evaluation finished", flush=True)

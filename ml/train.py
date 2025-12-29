@@ -105,7 +105,15 @@ dataset_parameters = config.dataset_train.dataset_params
 # dataset_parameters.device = DEVICE  # REMOVED
 dataset_parameters.normalizer = normalizer  # Pass normalizer instance
 
-dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
+if dataset_name == "StationaryDataset":
+    dataset_parameters.corruption_config = config.corruption
+    # Don't convert to dict - pass object directly
+    dataset = REGISTRY[dataset_name](
+        **{k: v for k, v in dataset_parameters.__dict__.items() if k != 'corruption_config'},
+        corruption_config=config.corruption
+    )
+else:
+    dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
 # Fit normalizer if needed (e.g., for data-dependent statistics)
 if normalizer.needs_fitting:

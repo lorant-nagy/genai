@@ -48,7 +48,17 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
     dataset_parameters = config.dataset_eval.dataset_params
     dataset_parameters.device = DEVICE
     dataset_parameters.normalizer = normalizer
-    dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
+
+    # Special handling for StationaryDataset
+    if dataset_name == "StationaryDataset":
+        dataset_parameters.corruption_config = config.corruption
+        # Don't convert to dict - pass object directly
+        dataset = REGISTRY[dataset_name](
+            **{k: v for k, v in dataset_parameters.__dict__.items() if k != 'corruption_config'},
+            corruption_config=config.corruption
+        )
+    else:
+        dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
     # Fit normalizer if needed (should already be fitted from training, but just in case)
     if normalizer.needs_fitting:
@@ -56,7 +66,10 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
         normalizer.fit(dataset)
         print(f"[bold green]Normalizer fitted[/bold green]")
 
+    # dataloader_parameters = config.dataset_eval.dataloader_params
+
     dataloader = DataLoader(dataset, **config.dataloader.to_dict())
+    
 
     model_name = config.model.cls
     model_parameters = config.model.model_params
@@ -202,10 +215,6 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
             save_dir=eval_path,
             device=DEVICE
         )
-        
-        print(f"[bold yellow]Test complete. Training will NOT continue (test mode).[/bold yellow]")
-    
-
 
     wandb.run.log({}, commit=True)
     print("*** evaluation finished", flush=True)

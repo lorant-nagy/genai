@@ -355,24 +355,10 @@ class OxfordFlowers102Dataset(Dataset):
 @register
 class StationaryDataset(Dataset):
     """
-    Dataset that samples from the stationary distribution of a process.
+    Dataset that samples from the stationary distribution.
     
-    Uses StationarySampler internally. Instead of passing full config,
-    we pass only the necessary process parameters.
-    
-    Args:
-        normalizer: Normalizer instance for data transformation
-        C: Number of channels
-        H: Image height
-        W: Image width
-        device: Device to create tensors on
-        length: Number of samples per epoch
-        equilibration_factor: Multiply T by this for equilibration (default: 5.0)
-        process_cls: Process class name (e.g., "SuperlinearLangevin")
-        process_params: Dict of process parameters
-        integrator_cls: Integrator class name (e.g., "EulerMaruyama")
-        integrator_params: Dict of integrator parameters
-        n_steps: Base number of steps for forward simulation
+    Creates a sampler using corruption process parameters from config.
+    Much simpler - doesn't duplicate all the process params.
     """
     
     def __init__(
@@ -384,15 +370,10 @@ class StationaryDataset(Dataset):
         device: str = "cpu",
         length: int = 1000,
         equilibration_factor: float = 5.0,
-        process_cls: str = "SuperlinearLangevin",
-        process_params: dict = None,
-        integrator_cls: str = "EulerMaruyama",
-        integrator_params: dict = None,
-        n_steps: int = 100,
+        corruption_config = None,  # Pass the corruption section of config
         **kwargs,
     ):
-        from diff.sim_core import SDESolver
-        from utils.registry import REGISTRY
+        from diff.samplers import StationarySampler
         
         self.normalizer = normalizer
         self.C = C
@@ -401,61 +382,37 @@ class StationaryDataset(Dataset):
         self.device = device
         self.length = length
         
-        # Setup process with longer T
-        if process_params is None:
-            raise ValueError("StationaryDataset requires process_params")
+        if corruption_config is None:
+            raise ValueError("StationaryDataset requires corruption_config")
         
-        # Copy and modify for equilibration
-        proc_params = dict(process_params)
-        T_base = proc_params.get('T', 1.0)
-        proc_params['T'] = T_base * equilibration_factor
-        proc_params['device'] = device
+        # Create a mini-config object that StationarySampler expects
+        class MiniConfig:
+            def __init__(self, corruption):
+                self.corruption = corruption
         
-        # Don't need score table for forward sampling
-        proc_params['score_table_params'] = None
+        mini_config = MiniConfig(corruption_config)
         
-        # Create process
-        process = REGISTRY[process_cls](**proc_params)
-        
-        # Setup integrator
-        if integrator_params is None:
-            integrator_params = {}
-        integrator = REGISTRY[integrator_cls](**integrator_params)
-        
-        # Create solver
-        self.solver = SDESolver(process, integrator)
-        self.n_steps = int(n_steps * equilibration_factor)
+        # Create sampler
+        self.sampler = StationarySampler(
+            config=mini_config,
+            device=device,
+            equilibration_factor=equilibration_factor
+        )
         
         print(f"StationaryDataset initialized:")
         print(f"  - Image size: {H}x{W}")
         print(f"  - Channels: {C}")
         print(f"  - Device: {device}")
-        print(f"  - Process: {process_cls}")
-        print(f"  - T (equilibrated): {proc_params['T']:.2f}")
-        print(f"  - Steps: {self.n_steps}")
+        print(f"  - Equilibration factor: {equilibration_factor}")
         print(f"  - Length: {length}")
     
     def __len__(self) -> int:
         return self.length
     
     def __getitem__(self, idx: int) -> torch.Tensor:
-        """
-        Generate a stationary sample.
-        
-        Returns:
-            Tensor of shape (C, H, W) in normalized range
-        """
-        # Start from N(0, 1)
-        x0 = torch.randn(1, self.C, self.H, self.W, device=self.device)
-        
-        # Run forward to equilibrate
-        with torch.no_grad():
-            import random
-            seed = random.randint(0, 2**32 - 1)
-            t_grid, X = self.solver.simulate(x0, n_steps=self.n_steps, seed=seed)
-        
-        # Take final state
-        sample = X[-1, 0]  # (C, H, W)
+        """Generate a stationary sample."""
+        # Sample (batch_size=1)
+        sample = self.sampler((1, self.C, self.H, self.W))[0]  # (C, H, W)
         
         # Apply normalizer
         sample = self.normalizer.normalize(sample)

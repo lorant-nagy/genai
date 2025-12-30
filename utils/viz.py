@@ -11,7 +11,7 @@ from diff.sim_core import SDESolver
 from diff.reverse import make_reverse
 from diff.samplers import StationarySampler
 import random
-seed = random.randint(0, 2**32 - 1)
+
 
 
 def generate_samples(
@@ -23,7 +23,7 @@ def generate_samples(
     dataset,
     device,
     n_samples=9,
-    n_steps=100
+    n_steps=None
 ):
     """
     Generate samples from the model and return as wandb.Image.
@@ -63,6 +63,7 @@ def generate_samples(
         x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
         
         # Run reverse process
+        seed = random.randint(0, 2**32 - 1)
         with torch.inference_mode():
             t_grid, X = solver.simulate(x0, n_steps=n_steps, seed=seed)
         

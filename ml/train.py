@@ -249,7 +249,7 @@ for epoch in range(config.train.n_epochs):
             dataset=dataset,
             device=DEVICE,
             n_samples=9,
-            n_steps=100  # Quick sampling for speed
+            n_steps=config.corruption.corruptor_params.n_steps  # Quick sampling for speed
         )
         if sample_img:
             log_dict["generated_samples"] = sample_img

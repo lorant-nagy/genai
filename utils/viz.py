@@ -10,6 +10,8 @@ from rich import print
 from diff.sim_core import SDESolver
 from diff.reverse import make_reverse
 from diff.samplers import StationarySampler
+import random
+seed = random.randint(0, 2**32 - 1)
 
 
 def generate_samples(
@@ -62,7 +64,7 @@ def generate_samples(
         
         # Run reverse process
         with torch.inference_mode():
-            t_grid, X = solver.simulate(x0, n_steps=n_steps)
+            t_grid, X = solver.simulate(x0, n_steps=n_steps, seed=seed)
         
         # Get final samples (latest time = reconstructed data)
         final_samples = X[-1]  # [n_samples, C, H, W]

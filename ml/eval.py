@@ -50,21 +50,22 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
     dataset_parameters.normalizer = normalizer
 
     # Special handling for StationaryDataset
-    if dataset_name == "StationaryDataset":
-        dataset_parameters.corruption_config = config.corruption
-        # Don't convert to dict - pass object directly
-        dataset = REGISTRY[dataset_name](
-            **{k: v for k, v in dataset_parameters.__dict__.items() if k != 'corruption_config'},
-            corruption_config=config.corruption
-        )
-    else:
-        dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
+    # if dataset_name == "StationaryDataset":
+    #     dataset_parameters.corruption_config = config.corruption
+    #     # Don't convert to dict - pass object directly
+    #     dataset = REGISTRY[dataset_name](
+    #         **{k: v for k, v in dataset_parameters.__dict__.items() if k != 'corruption_config'},
+    #         corruption_config=config.corruption
+    #     )
+    # else:
+        
+    dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
     # Fit normalizer if needed (should already be fitted from training, but just in case)
-    if normalizer.needs_fitting:
-        print(f"[bold yellow]Fitting normalizer to dataset...[/bold yellow]")
-        normalizer.fit(dataset)
-        print(f"[bold green]Normalizer fitted[/bold green]")
+    # if normalizer.needs_fitting:
+    #     print(f"[bold yellow]Fitting normalizer to dataset...[/bold yellow]")
+    #     normalizer.fit(dataset)
+    #     print(f"[bold green]Normalizer fitted[/bold green]")
 
     # dataloader_parameters = config.dataset_eval.dataloader_params
 
@@ -203,18 +204,19 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
             print(f"  ✗ Skipped {key} (file not found)")
             
     
-    if hasattr(config.eval, 'test') and config.eval.test:
-        from utils.tests import test_stationary_recovery
+    # This part is for testing stationary recovery - temoral code - only works with StationaryDataset
+    # if hasattr(config.eval, 'test') and config.eval.test:
+    #     from utils.tests import test_stationary_recovery
         
-        print(f"\n[bold cyan]-------> running stationary recovery test[/bold cyan]", flush=True)
+    #     print(f"\n[bold cyan]-------> running stationary recovery test[/bold cyan]", flush=True)
         
-        test_stationary_recovery(
-            x0=x0,
-            x_final=X[-1],
-            config=config,
-            save_dir=eval_path,
-            device=DEVICE
-        )
+    #     test_stationary_recovery(
+    #         x0=x0,
+    #         x_final=X[-1],
+    #         config=config,
+    #         save_dir=eval_path,
+    #         device=DEVICE
+    #     )
 
     wandb.run.log({}, commit=True)
     print("*** evaluation finished", flush=True)

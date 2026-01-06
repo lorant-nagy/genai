@@ -190,6 +190,106 @@ best_loss = float('inf')
 average_loss_per_sample = 0.0
 loss_evo = []
 
+# Store last 5 epochs for table display
+
+# Print config once (using rich markup)
+print(f"\n[bold green]{'='*105}[/bold green]")
+print(f"[bold green]RUN:[/bold green] [bold yellow]{petname_str}[/bold yellow]  [dim]({time_str})[/dim]")
+print(f"[bold green]{'='*105}[/bold green]\n")
+
+print(f"[bold cyan]CONFIG:[/bold cyan]")
+print(f"  [blue]Dataset:[/blue] [yellow]{dataset_name}[/yellow]  [blue]Model:[/blue] [yellow]{model_name}[/yellow]  [blue]Device:[/blue] [yellow]{DEVICE}[/yellow]")
+print(f"  [blue]Process:[/blue] [yellow]{process_name}[/yellow]  [blue]Integrator:[/blue] [yellow]{integrator_name}[/yellow]  [blue]Loss:[/blue] [yellow]{config.loss.cls}[/yellow]")
+
+# Get n_steps for main display
+n_steps_display = "N/A"
+if hasattr(config.corruption, 'corruptor_params') and hasattr(config.corruption.corruptor_params, 'n_steps'):
+    n_steps_display = config.corruption.corruptor_params.n_steps
+
+print(f"  [blue]Optimizer:[/blue] [yellow]{optimizer_name}[/yellow]  [blue]Epochs:[/blue] [yellow]{config.train.n_epochs}[/yellow]  [blue]Batch:[/blue] [yellow]{config.dataloader.batch_size}[/yellow]  [blue]Steps:[/blue] [yellow]{n_steps_display}[/yellow]")
+
+# Model architecture details
+if hasattr(config.model, 'model_params'):
+    mp = config.model.model_params
+    model_info = []
+    if hasattr(mp, 'model_channels'):
+        model_info.append(f"ch={mp.model_channels}")
+    if hasattr(mp, 'channel_mult'):
+        model_info.append(f"mult={mp.channel_mult}")
+    if hasattr(mp, 'num_res_blocks'):
+        model_info.append(f"res={mp.num_res_blocks}")
+    if hasattr(mp, 'attention_resolutions'):
+        model_info.append(f"attn={mp.attention_resolutions}")
+    if hasattr(mp, 'dropout'):
+        model_info.append(f"dropout={mp.dropout}")
+    if model_info:
+        print(f"  [dim]Model: {', '.join(model_info)}[/dim]")
+
+# Optimizer parameters
+if hasattr(config.train, 'optimizer_params'):
+    op = config.train.optimizer_params
+    opt_info = []
+    if hasattr(op, 'lr'):
+        opt_info.append(f"lr={op.lr}")
+    if hasattr(op, 'weight_decay'):
+        opt_info.append(f"wd={op.weight_decay}")
+    if hasattr(op, 'betas'):
+        opt_info.append(f"betas={op.betas}")
+    if opt_info:
+        print(f"  [dim]Opt: {', '.join(opt_info)}[/dim]")
+
+# Process parameters
+if hasattr(config.corruption, 'process_params'):
+    pp = config.corruption.process_params
+    proc_info = []
+    if hasattr(pp, 'alpha'):
+        proc_info.append(f"α={pp.alpha}")
+    if hasattr(pp, 'T'):
+        proc_info.append(f"T={pp.T}")
+    if hasattr(pp, 'sigma'):
+        proc_info.append(f"σ={pp.sigma}")
+    if hasattr(pp, 't0'):
+        proc_info.append(f"t0={pp.t0}")
+    if hasattr(pp, 'c_alpha'):
+        proc_info.append(f"c_α={pp.c_alpha}")
+    if hasattr(pp, 'c_0'):
+        proc_info.append(f"c0={pp.c_0}")
+    if proc_info:
+        print(f"  [dim]Process: {', '.join(proc_info)}[/dim]")
+
+# Corruption/integrator details
+corr_info = []
+if hasattr(config.corruption, 'integrator_params') and hasattr(config.corruption.integrator_params, 'r'):
+    corr_info.append(f"r={config.corruption.integrator_params.r}")
+if corr_info:
+    print(f"  [dim]Corruption: {', '.join(corr_info)}[/dim]")
+
+# Dataloader info
+dl_info = []
+if hasattr(config.dataloader, 'num_workers'):
+    dl_info.append(f"workers={config.dataloader.num_workers}")
+if hasattr(config.dataloader, 'shuffle'):
+    dl_info.append(f"shuffle={config.dataloader.shuffle}")
+if dl_info:
+    print(f"  [dim]Dataloader: {', '.join(dl_info)}[/dim]")
+
+# Other info
+if viz_every:
+    print(f"  [dim]Viz: every {viz_every} epochs[/dim]")
+
+if hasattr(config.dataset_train, 'normalizer_cls'):
+    print(f"  [dim]Normalizer: {config.dataset_train.normalizer_cls}[/dim]")
+
+print(f"\n[bold cyan]TRAINING:[/bold cyan]")
+print(f"  [bold]{'Epoch':<10} {'Loss':<15} {'Status'}[/bold]")
+print(f"  [dim]{'─'*10} {'─'*15} {'─'*10}[/dim]")
+
+# Define custom WandB step metric for epoch-based logging
+wandb.define_metric("epoch")
+wandb.define_metric("epoch_loss", step_metric="epoch")
+wandb.define_metric("generated_samples", step_metric="epoch")
+wandb.define_metric("best_loss", step_metric="epoch")
+
 for epoch in range(config.train.n_epochs):
     # FIX #4: Use Python float for loss accumulation
     loss_sum = 0.0  # Changed from loss = 0.0 (tensor accumulation)
@@ -212,22 +312,21 @@ for epoch in range(config.train.n_epochs):
         wandb.log({
             "batch_loss": output.item()
         })
-        
-        print(f"batch {c+1}/{len(dataloader_train)}", end="\r", flush=True)
     
     # FIX #4: loss_sum is already a Python float
     average_loss_per_sample = loss_sum / len(dataloader_train)
     
-    # Build epoch message
-    epoch_msg = f"Epoch {epoch+1}/{config.train.n_epochs} || Loss: {average_loss_per_sample:.6f}"
-    
     # Check if we should generate samples
     should_visualize = viz_every is not None and viz_every > 0 and ((epoch + 1) % viz_every == 0 or (epoch + 1) == 1)
     
-    if should_visualize:
-        epoch_msg += " → [magenta]generating samples...[/magenta]"
+    # Store epoch data
     
-    print(epoch_msg, flush=True)
+    # Print simple one-line progress
+    epoch_str = f"{epoch + 1}/{config.train.n_epochs}"
+    loss_str = f"{average_loss_per_sample:.6f}"
+    status_str = "[magenta bold]●[/magenta bold]" if should_visualize else ""
+    print(f"  {epoch_str:<10} {loss_str:<15} {status_str}", flush=True)
+
     
     loss_evo.append(average_loss_per_sample)
     
@@ -253,8 +352,6 @@ for epoch in range(config.train.n_epochs):
         )
         if sample_img:
             log_dict["generated_samples"] = sample_img
-        else:
-            print(f"                                → [red]sample generation failed[/red]", flush=True)
     
     wandb.log(log_dict)
     

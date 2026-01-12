@@ -44,17 +44,14 @@ print("[bold green]-------------------------------------------------------------
 print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")
 print("[bold green]---------------------------------------------------------------[/bold green]")
 
-# FIX #1: Device handling - read from env or command line
-if args.device is not None:
-    DEVICE = args.device
-else:
-    # Read from environment variable with fallback to auto-detect
-    DEVICE = os.environ.get('DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
+
+DEVICE = args.device
 
 # Validate and set device
 if DEVICE.startswith("cuda") and not torch.cuda.is_available():
     print(f"[bold red]CUDA not available, using CPU[/bold red]")
-    DEVICE = "cpu"
+    # stop execution if cuda was explicitly requested
+    sys.exit(1)
 elif DEVICE.startswith("cuda"):
     torch.cuda.set_device(DEVICE)
     print(f"[bold green]GPU: {torch.cuda.get_device_name(DEVICE)}[/bold green]")
@@ -81,6 +78,17 @@ with open(os.path.join(run_dir, "config.yaml"), "w") as f:
 
 # Initialize wandb
 wandb_config = config.wandb
+
+tags_from_config = getattr(wandb_config, 'tags', [])
+if isinstance(tags_from_config, str):
+    tags_from_config = [tags_from_config]
+
+integrator_tag = config.corruption.integrator_cls
+if hasattr(config.corruption.integrator_params, 'r'):
+    integrator_tag = f"{integrator_tag}_r{config.corruption.integrator_params.r}"
+
+tags = [config.corruption.process_cls, config.model.cls, integrator_tag] + tags_from_config
+
 wandb.init(
         project=getattr(wandb_config, 'project', 'diffusion-training'),
         entity=getattr(wandb_config, 'entity', None),
@@ -89,7 +97,7 @@ wandb.init(
         dir=run_dir,
         mode=getattr(wandb_config, 'mode', 'online'),
         notes=getattr(wandb_config, 'notes', ''),
-        tags=[config.corruption.process_cls, config.model.cls] + getattr(wandb_config, 'tags', [])
+        tags=tags
     )
 
 
@@ -405,6 +413,9 @@ wandb.log({"loss_evolution": wandb.Image(loss_plot_path)})
 
 # Finish wandb
 wandb.finish()
+
+torch.cuda.empty_cache()
+del model
 
 print("[bold green]---------------------------------------------------------------[/bold green]")
 print(f"[bold green]RUN ENDED -- NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/]")

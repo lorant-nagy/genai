@@ -63,7 +63,7 @@ class SuperlinearLangevin(ItoProcess):
     def __init__(
         self,
         t0: float = 0.0,
-        T: float = 1.0,
+        T: float = None,
         alpha: float = 3.0,
         c_alpha: float = 1.0,
         c_0: float = 0.5,

@@ -43,10 +43,12 @@ class StateNormTamedEuler(Integrator):
 @register
 class DriftNormTamedEuler(Integrator):
     # x_{n+1} = x_n + dt * b(x_n,t_n)/(1 + dt*||b(x_n,t_n)||) + sigma(x_n,t_n) dW_n
-    def __init__(self, eps: float = 0.0):
+    def __init__(self, alpha: float = None, eps: float = 0.0):
+        self.alpha = alpha
         self.eps = float(eps)
 
     def step(self, process, x: torch.Tensor, t: float, dt: float, dW: torch.Tensor) -> torch.Tensor:
+        T = process.T
         drift = process.drift(x, t)
         diffusion = process.diffusion(x, t)
 
@@ -54,5 +56,6 @@ class DriftNormTamedEuler(Integrator):
         drift_norm = torch.linalg.vector_norm(drift.reshape(B, -1), dim=1, keepdim=True)  # (B,1)
         drift_norm = drift_norm.view(B, 1, 1, 1)
 
-        taming = 1.0 + dt * (drift_norm + self.eps)
+        taming = 1.0 + (dt ** self.alpha) / (T ** self.alpha) * (drift_norm + self.eps)
+        # taming = 1.0 + dt * (drift_norm + self.eps)
         return x + (drift / taming) * dt + diffusion * dW

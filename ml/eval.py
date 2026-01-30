@@ -218,5 +218,29 @@ def eval(config, state_dict_path, eval_path, device="cpu"):
     #         device=DEVICE
     #     )
 
+    
+    # =========================================================================
+    # COMPUTE METRICS using the function from metrics.py
+    # =========================================================================
+    from ml.metrics import compute_metrics_with_model
+    
+    metrics = compute_metrics_with_model(
+        config=config,
+        model=model,
+        dataset=dataset,
+        dataloader=dataloader,
+        device=DEVICE,
+        log_prefix="best_model",
+        n_samples=None  # Use config default
+    )
+    
+    # Save metrics to JSON file
+    if metrics is not None:
+        import json
+        metrics_file = os.path.join(eval_path, "metrics.json")
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        print(f"  [green]✓ Saved metrics to {metrics_file}[/green]")
+
     wandb.run.log({}, commit=True)
-    print("*** evaluation finished", flush=True)
+    print("\n[bold green]*** evaluation finished[/bold green]", flush=True)

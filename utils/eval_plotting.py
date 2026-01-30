@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 
 import numpy as np
 import torch
@@ -16,6 +16,163 @@ def _to_numpy(x):
     if torch.is_tensor(x):
         return x.detach().cpu().numpy()
     return np.asarray(x)
+
+
+# ------------------------- NEW: Metric Evolution Plotting -------------------------
+
+def plot_metrics_evolution(
+    metrics_history: Dict[str, List[float]],
+    epochs: List[int],
+    save_path: str,
+    title: str = "Metrics Evolution During Training"
+) -> None:
+    """
+    Plot evolution of all metrics over training.
+    
+    Creates separate subplots for each metric type:
+    - FID
+    - KID (mean ± std)
+    - Wasserstein distances (W1, W2 in both spaces)
+    
+    Args:
+        metrics_history: Dict mapping metric name to list of values
+        epochs: List of epoch numbers when metrics were computed
+        save_path: Path to save the plot
+        title: Plot title
+    """
+    # Determine which metrics we have
+    has_fid = 'fid' in metrics_history and len(metrics_history['fid']) > 0
+    has_kid = 'kid_mean' in metrics_history and len(metrics_history['kid_mean']) > 0
+    has_w_pixel = 'w1_pixel' in metrics_history and len(metrics_history['w1_pixel']) > 0
+    has_w_embed = 'w1_embedding' in metrics_history and len(metrics_history['w1_embedding']) > 0
+    
+    # Count how many subplots we need
+    n_plots = sum([has_fid, has_kid, has_w_pixel, has_w_embed])
+    
+    if n_plots == 0:
+        print(f"  [yellow]No metrics to plot[/yellow]")
+        return
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(n_plots, 1, figsize=(10, 3 * n_plots), squeeze=False)
+    axes = axes.flatten()
+    
+    plot_idx = 0
+    
+    # Plot FID
+    if has_fid:
+        ax = axes[plot_idx]
+        ax.plot(epochs, metrics_history['fid'], 'o-', linewidth=2, markersize=6, color='#2E86AB')
+        ax.set_xlabel('Epoch', fontsize=11)
+        ax.set_ylabel('FID', fontsize=11)
+        ax.set_title('FID Evolution (lower is better)', fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        plot_idx += 1
+    
+    # Plot KID
+    if has_kid:
+        ax = axes[plot_idx]
+        kid_mean = np.array(metrics_history['kid_mean'])
+        kid_std = np.array(metrics_history['kid_std'])
+        
+        ax.plot(epochs, kid_mean, 'o-', linewidth=2, markersize=6, color='#A23B72', label='KID mean')
+        ax.fill_between(epochs, kid_mean - kid_std, kid_mean + kid_std, 
+                        alpha=0.2, color='#A23B72', label='± 1 std')
+        ax.set_xlabel('Epoch', fontsize=11)
+        ax.set_ylabel('KID', fontsize=11)
+        ax.set_title('KID Evolution (lower is better)', fontsize=12, fontweight='bold')
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        plot_idx += 1
+    
+    # Plot Wasserstein (pixel space)
+    if has_w_pixel:
+        ax = axes[plot_idx]
+        if 'w1_pixel' in metrics_history:
+            ax.plot(epochs, metrics_history['w1_pixel'], 'o-', linewidth=2, 
+                   markersize=6, color='#F18F01', label='W1')
+        if 'w2_pixel' in metrics_history:
+            ax.plot(epochs, metrics_history['w2_pixel'], 's-', linewidth=2, 
+                   markersize=6, color='#C73E1D', label='W2')
+        ax.set_xlabel('Epoch', fontsize=11)
+        ax.set_ylabel('Wasserstein Distance', fontsize=11)
+        ax.set_title('Wasserstein Distance - Pixel Space (lower is better)', fontsize=12, fontweight='bold')
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        plot_idx += 1
+    
+    # Plot Wasserstein (embedding space)
+    if has_w_embed:
+        ax = axes[plot_idx]
+        if 'w1_embedding' in metrics_history:
+            ax.plot(epochs, metrics_history['w1_embedding'], 'o-', linewidth=2, 
+                   markersize=6, color='#6A4C93', label='W1')
+        if 'w2_embedding' in metrics_history:
+            ax.plot(epochs, metrics_history['w2_embedding'], 's-', linewidth=2, 
+                   markersize=6, color='#1982C4', label='W2')
+        ax.set_xlabel('Epoch', fontsize=11)
+        ax.set_ylabel('Wasserstein Distance', fontsize=11)
+        ax.set_title('Wasserstein Distance - Embedding Space (lower is better)', fontsize=12, fontweight='bold')
+        ax.legend(loc='best', fontsize=10)
+        plot_idx += 1
+    
+    plt.suptitle(title, fontsize=14, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  [green]✓ Saved metrics evolution plot to {save_path}[/green]")
+
+
+def plot_single_metric_evolution(
+    metric_name: str,
+    values: List[float],
+    epochs: List[int],
+    save_path: str,
+    std_values: Optional[List[float]] = None,
+    ylabel: str = None,
+    title: str = None
+) -> None:
+    """
+    Plot evolution of a single metric.
+    
+    Args:
+        metric_name: Name of the metric (for title)
+        values: List of metric values
+        epochs: List of epoch numbers
+        save_path: Path to save the plot
+        std_values: Optional standard deviations (for KID)
+        ylabel: Y-axis label (default: metric_name)
+        title: Plot title (default: auto-generated)
+    """
+    if len(values) == 0:
+        return
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    values = np.array(values)
+    
+    # Plot main line
+    ax.plot(epochs, values, 'o-', linewidth=2, markersize=8, color='#2E86AB')
+    
+    # Add error band if std provided
+    if std_values is not None:
+        std_values = np.array(std_values)
+        ax.fill_between(epochs, values - std_values, values + std_values,
+                        alpha=0.2, color='#2E86AB', label='± 1 std')
+        ax.legend(loc='best', fontsize=11)
+    
+    ax.set_xlabel('Epoch', fontsize=12)
+    ax.set_ylabel(ylabel or metric_name.upper(), fontsize=12)
+    ax.set_title(title or f'{metric_name.upper()} Evolution During Training', 
+                fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  [green]✓ Saved {metric_name} plot to {save_path}[/green]")
 
 
 def _as_imshow_img(

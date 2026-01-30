@@ -17,6 +17,8 @@ from utils.config import load_cfg
 from utils.registry import REGISTRY
 from utils.viz import generate_samples
 from utils.viz import get_data_samples
+from utils.metrics import compute_metrics_with_model
+from utils.eval_plotting import plot_metrics_evolution
 
 from ml.eval import eval
 
@@ -28,6 +30,7 @@ from ml.dataset import RectanglesDataset
 from ml.model import ScoreNet
 from diff.sde import VPOU
 from diff.sde import SuperlinearLangevin
+
 
 
 parser = argparse.ArgumentParser(description="Training script")
@@ -193,8 +196,30 @@ if viz_every is not None and viz_every > 0:
         print("[cyan]Initial data samples → logged[/cyan]")
 
 print(f"[bold green]*** TRAINING STARTED[/bold green]")
-best_model = None
+
+# Track best model by loss
+best_model_loss = None
 best_loss = float('inf')
+
+# Track best models by metrics
+best_models = {
+    'loss': {'value': float('inf'), 'state_dict': None, 'epoch': 0},
+    'fid': {'value': float('inf'), 'state_dict': None, 'epoch': 0},
+    'kid': {'value': float('inf'), 'state_dict': None, 'epoch': 0},
+}
+
+# Track metrics evolution during training
+metrics_history = {
+    'epochs': [],
+    'fid': [],
+    'kid_mean': [],
+    'kid_std': [],
+    'w1_pixel': [],
+    'w2_pixel': [],
+    'w1_embedding': [],
+    'w2_embedding': [],
+}
+
 average_loss_per_sample = 0.0
 loss_evo = []
 
@@ -327,12 +352,26 @@ for epoch in range(config.train.n_epochs):
     # Check if we should generate samples
     should_visualize = viz_every is not None and viz_every > 0 and ((epoch + 1) % viz_every == 0 or (epoch + 1) == 1)
     
+    # Check if we should compute metrics
+    metrics_every = getattr(config.eval, 'metrics_every', None)
+    should_compute_metrics = (
+        metrics_every is not None and 
+        metrics_every > 0 and 
+        (epoch + 1) % metrics_every == 0 and
+        (epoch + 1) > 0  # Don't compute at epoch 0
+    )
+    
     # Store epoch data
     
     # Print simple one-line progress
     epoch_str = f"{epoch + 1}/{config.train.n_epochs}"
     loss_str = f"{average_loss_per_sample:.6f}"
-    status_str = "[magenta bold]●[/magenta bold]" if should_visualize else ""
+    status_indicators = []
+    if should_visualize:
+        status_indicators.append("[magenta bold]●[/magenta bold]")  # Visualization
+    if should_compute_metrics:
+        status_indicators.append("[cyan bold]◆[/cyan bold]")  # Metrics
+    status_str = " ".join(status_indicators)
     print(f"  {epoch_str:<10} {loss_str:<15} {status_str}", flush=True)
 
     
@@ -361,39 +400,176 @@ for epoch in range(config.train.n_epochs):
         if sample_img:
             log_dict["generated_samples"] = sample_img
     
+    # Compute metrics periodically if requested
+    if should_compute_metrics:
+        print(f"    [cyan]Computing metrics at epoch {epoch + 1}...[/cyan]", flush=True)
+        try:
+            
+            # Get sample count for training metrics (fewer than final eval)
+            n_metric_samples = getattr(config.eval, 'n_metric_samples_training', 500)
+            
+            # Call the reusable metrics function (DON'T log to WandB)
+            metrics = compute_metrics_with_model(
+                config=config,
+                model=model,
+                dataset=dataset,
+                dataloader=dataloader_train,
+                device=DEVICE,
+                log_prefix="training",
+                n_samples=n_metric_samples,
+                log_to_wandb=False  # ← Don't log during training
+            )
+            
+            if metrics is not None:
+                # Store in history for plotting
+                metrics_history['epochs'].append(epoch + 1)
+                metrics_history['fid'].append(metrics['fid'])
+                metrics_history['kid_mean'].append(metrics['kid_mean'])
+                metrics_history['kid_std'].append(metrics['kid_std'])
+                metrics_history['w1_pixel'].append(metrics['w1_pixel'])
+                metrics_history['w2_pixel'].append(metrics['w2_pixel'])
+                metrics_history['w1_embedding'].append(metrics['w1_embedding'])
+                metrics_history['w2_embedding'].append(metrics['w2_embedding'])
+                
+                # Track best models by metrics
+                if metrics['fid'] < best_models['fid']['value']:
+                    best_models['fid']['value'] = metrics['fid']
+                    best_models['fid']['state_dict'] = model.state_dict().copy()
+                    best_models['fid']['epoch'] = epoch + 1
+                    print(f"    [green]✓ New best FID: {metrics['fid']:.2f} (epoch {epoch + 1})[/green]")
+                
+                if metrics['kid_mean'] < best_models['kid']['value']:
+                    best_models['kid']['value'] = metrics['kid_mean']
+                    best_models['kid']['state_dict'] = model.state_dict().copy()
+                    best_models['kid']['epoch'] = epoch + 1
+                    print(f"    [green]✓ New best KID: {metrics['kid_mean']:.4f} (epoch {epoch + 1})[/green]")
+                
+                print(f"    [green]✓ FID: {metrics['fid']:.2f}, KID: {metrics['kid_mean']:.4f}[/green]", flush=True)
+            
+        except Exception as e:
+            print(f"    [red]✗ Metrics computation failed: {e}[/red]", flush=True)
+            import traceback
+            traceback.print_exc()
+    
     wandb.log(log_dict)
     
-    # Check if this is the best model (handles NaN/Inf properly)
+    # Check if this is the best model by loss (handles NaN/Inf properly)
     if not (torch.isnan(torch.tensor(average_loss_per_sample)) or 
             torch.isinf(torch.tensor(average_loss_per_sample))):
         if average_loss_per_sample < best_loss:
             best_loss = average_loss_per_sample
-            best_model = model.state_dict()
+            best_models['loss']['value'] = best_loss
+            best_models['loss']['state_dict'] = model.state_dict().copy()
+            best_models['loss']['epoch'] = epoch + 1
 
 # Safety: if no best model was saved (all losses were NaN/Inf), save the last model
-if best_model is None:
+if best_models['loss']['state_dict'] is None:
     print("[bold yellow]Warning: No valid loss found during training. Saving last model state.[/bold yellow]")
-    best_model = model.state_dict()
+    best_models['loss']['state_dict'] = model.state_dict()
+    best_models['loss']['epoch'] = config.train.n_epochs
     best_loss = average_loss_per_sample
 
 print(f"*** training finished", flush=True)
 
-# save model
-model_path = os.path.join(run_dir, "best_model.pth")
-torch.save(best_model, model_path)
-wandb.save(model_path)
+# =========================================================================
+# SAVE BEST MODELS
+# =========================================================================
+print("[bold green]SAVING BEST MODELS:[/bold green]")
 
-# report training
-print("[bold green]REPORT ON TRAINING:[/bold green]")
-print(f"Best Loss: {best_loss:.6f}", flush=True)
+# Save best model by loss (main model)
+model_path_loss = os.path.join(run_dir, "best_model_loss.pth")
+torch.save(best_models['loss']['state_dict'], model_path_loss)
+wandb.save(model_path_loss)
+print(f"  Best by Loss (epoch {best_models['loss']['epoch']}): {best_loss:.6f}")
+
+# Save best model by FID (if computed)
+if best_models['fid']['state_dict'] is not None:
+    model_path_fid = os.path.join(run_dir, "best_model_fid.pth")
+    torch.save(best_models['fid']['state_dict'], model_path_fid)
+    wandb.save(model_path_fid)
+    print(f"  Best by FID (epoch {best_models['fid']['epoch']}): {best_models['fid']['value']:.2f}")
+
+# Save best model by KID (if computed)
+if best_models['kid']['state_dict'] is not None:
+    model_path_kid = os.path.join(run_dir, "best_model_kid.pth")
+    torch.save(best_models['kid']['state_dict'], model_path_kid)
+    wandb.save(model_path_kid)
+    print(f"  Best by KID (epoch {best_models['kid']['epoch']}): {best_models['kid']['value']:.4f}")
+
+# =========================================================================
+# CREATE AND UPLOAD METRICS EVOLUTION PLOTS
+# =========================================================================
+if len(metrics_history['epochs']) > 0:
+    print("\n[bold green]CREATING METRICS EVOLUTION PLOTS:[/bold green]")
+    
+    # Combined plot
+    metrics_plot_path = os.path.join(run_dir, "metrics_evolution.png")
+    plot_metrics_evolution(
+        metrics_history=metrics_history,
+        epochs=metrics_history['epochs'],
+        save_path=metrics_plot_path,
+        title="Metrics Evolution During Training"
+    )
+    
+    # Upload to WandB
+    wandb.log({"metrics_evolution": wandb.Image(metrics_plot_path)})
+    print(f"  [green]✓ Uploaded metrics evolution plot to WandB[/green]")
+
+# =========================================================================
+# REPORT TRAINING
+# =========================================================================
+print("\n[bold green]REPORT ON TRAINING:[/bold green]")
+print(f"  Best Loss: {best_loss:.6f} (epoch {best_models['loss']['epoch']})")
+if best_models['fid']['state_dict'] is not None:
+    print(f"  Best FID:  {best_models['fid']['value']:.2f} (epoch {best_models['fid']['epoch']})")
+if best_models['kid']['state_dict'] is not None:
+    print(f"  Best KID:  {best_models['kid']['value']:.4f} (epoch {best_models['kid']['epoch']})")
 
 # Log final summary
 wandb.summary["best_loss"] = best_loss
+wandb.summary["best_loss_epoch"] = best_models['loss']['epoch']
 wandb.summary["total_epochs"] = config.train.n_epochs
 
-# evaluate
-print("[bold green]*** STARTING EVALUATION[/bold green]")
-eval(config, model_path, run_dir, device=DEVICE)
+if best_models['fid']['state_dict'] is not None:
+    wandb.summary["best_fid"] = best_models['fid']['value']
+    wandb.summary["best_fid_epoch"] = best_models['fid']['epoch']
+
+if best_models['kid']['state_dict'] is not None:
+    wandb.summary["best_kid"] = best_models['kid']['value']
+    wandb.summary["best_kid_epoch"] = best_models['kid']['epoch']
+
+# =========================================================================
+# EVALUATE ALL BEST MODELS
+# =========================================================================
+print("\n[bold green]*** STARTING EVALUATION OF BEST MODELS[/bold green]")
+
+# Evaluate best model by loss
+print("\n[bold cyan]Evaluating: Best Model by Loss[/bold cyan]")
+eval_path_loss = os.path.join(run_dir, "eval_best_loss")
+os.makedirs(eval_path_loss, exist_ok=True)
+eval(config, model_path_loss, eval_path_loss, device=DEVICE)
+
+# Evaluate best model by FID (if exists and different from loss)
+if best_models['fid']['state_dict'] is not None:
+    if best_models['fid']['epoch'] != best_models['loss']['epoch']:
+        print("\n[bold cyan]Evaluating: Best Model by FID[/bold cyan]")
+        eval_path_fid = os.path.join(run_dir, "eval_best_fid")
+        os.makedirs(eval_path_fid, exist_ok=True)
+        eval(config, model_path_fid, eval_path_fid, device=DEVICE)
+    else:
+        print("[yellow]Best FID model is same as best loss model, skipping duplicate eval[/yellow]")
+
+# Evaluate best model by KID (if exists and different from others)
+if best_models['kid']['state_dict'] is not None:
+    if (best_models['kid']['epoch'] != best_models['loss']['epoch'] and
+        (best_models['fid']['state_dict'] is None or 
+         best_models['kid']['epoch'] != best_models['fid']['epoch'])):
+        print("\n[bold cyan]Evaluating: Best Model by KID[/bold cyan]")
+        eval_path_kid = os.path.join(run_dir, "eval_best_kid")
+        os.makedirs(eval_path_kid, exist_ok=True)
+        eval(config, model_path_kid, eval_path_kid, device=DEVICE)
+    else:
+        print("[yellow]Best KID model is same as another best model, skipping duplicate eval[/yellow]")
 
 # plots
 plt.figure()

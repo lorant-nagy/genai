@@ -6,3 +6,7 @@ rich
 wandb
 petname
 joblib
+# Metrics dependencies
+pot
+torch-fidelity
+scipy>=1.7.0

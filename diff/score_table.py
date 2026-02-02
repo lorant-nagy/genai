@@ -126,11 +126,11 @@ class PDESolver1D:
         # Check CFL condition for stability
         max_drift = torch.abs(self.g_scal(self.x_grid)).max().item()
         cfl = (max_drift * self.dt) / self.dx
-        if not quiet:  # Only print if not quiet
-            if cfl > 0.25:  # Stricter criterion to prevent oscillations
-                print(f"[red] CFL number: {cfl:.3f} [/red]")
+        if not quiet:
+            if cfl > 0.25:
+                print(f" [red]CFL number: {cfl:.3f}[/red]")
             else:
-                print(f"[green]CFL number: {cfl:.3f} [/green]")
+                print(f" [green]CFL number: {cfl:.3f}[/green]")
     
     def _initialize_delta_approx(self, x0: float) -> torch.Tensor:
         """
@@ -591,13 +591,13 @@ class ScoreTable:
         # Hardcoded: use all CPUs for parallel computation
         n_workers = -1
         
-        print(f"Building score table:")
+        print(f"[bold cyan]Building score table:[/bold cyan]")
         print(f"  Grid: {self.config.N_x0} x {self.config.N_t} x {self.config.N_x}")
         print(f"  Domain: x0 ∈ [{self.config.x0_min}, {self.config.x0_max}]")
         print(f"           x ∈ [{self.config.x_min}, {self.config.x_max}]")
         print(f"           t ∈ [0, {self.config.T}]")
         
-        # Build grids
+        # Build grids (silent)
         self._build_grids()
         
         # Extract drift function
@@ -641,7 +641,7 @@ class ScoreTable:
                 # Move to CPU if needed (for pickling)
                 original_device = self.device
                 if self.device != 'cpu':
-                    print("  Moving solver to CPU for parallel computation...")
+                    print(f"  Moving solver to CPU for parallel computation...")
                     pde_solver = PDESolver1D(
                         g_scal=g_scal,
                         sigma=self.process.sigma,
@@ -678,12 +678,12 @@ class ScoreTable:
                     p_table = p_table.to(original_device)
                 
             except ImportError:
-                print("  Warning: joblib not available, falling back to sequential")
+                print(f"  [yellow]Warning: joblib not available, falling back to sequential[/yellow]")
                 use_parallel = False
         
         if not use_parallel:
-            # SEQUENTIAL COMPUTATION (original)
-            print("  Using sequential computation")
+            # SEQUENTIAL COMPUTATION
+            print(f"  Using sequential computation")
             for k, x0_k in enumerate(self.x0_grid):
                 if (k + 1) % max(1, self.config.N_x0 // 10) == 0:
                     print(f"  Solving for x0[{k+1}/{self.config.N_x0}]...", flush=True)
@@ -697,7 +697,7 @@ class ScoreTable:
         if torch.isinf(p_table).any():
             raise ScoreTableNumericalError("Inf detected in density table")
         
-        print("  Computing scores from densities...")
+        print(f"  Computing scores from densities...")
         
         # Store density table for analytics
         self.p_table = p_table.clone()
@@ -712,12 +712,12 @@ class ScoreTable:
         if torch.isinf(self.S).any():
             raise ScoreTableNumericalError("Inf detected in score table")
         
-        print("  Building interpolator...")
+        print(f"  Building interpolator...")
         
         # Build interpolator
         self.interpolator = ScoreInterpolator(self)
         
-        print("Score table built successfully.")
+        print(f"[green]✓ Score table built successfully[/green]\n")
     
     def save(self, path: str, save_density: bool = True):
         """

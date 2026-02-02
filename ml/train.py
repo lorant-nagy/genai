@@ -17,8 +17,6 @@ from utils.config import load_cfg
 from utils.registry import REGISTRY
 from utils.viz import generate_samples
 from utils.viz import get_data_samples
-from utils.metrics import compute_metrics_with_model
-from utils.eval_plotting import plot_metrics_evolution
 
 from ml.eval import eval
 
@@ -128,9 +126,10 @@ else:
 
 # Fit normalizer if needed (e.g., for data-dependent statistics)
 if normalizer.needs_fitting:
-    print(f"[bold yellow]Fitting normalizer to dataset...[/bold yellow]")
-    normalizer.fit(dataset)
-    print(f"[bold green]Normalizer fitted successfully[/bold green]")
+    # print(f"[bold yellow]Fitting normalizer to dataset...[/bold yellow]")
+    # normalizer.fit(dataset)
+    # print(f"[bold green]Normalizer fitted successfully[/bold green]")
+    raise NotImplementedError("Dataset normalizer fitting not implemented yet.")
 
 dataloader_train = DataLoader(dataset, **config.dataloader.to_dict())
 
@@ -177,23 +176,12 @@ corruptor = Corruptor(**corruptor_parameters.to_dict())
 
 loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
 
-# print info on training
-
-print(f"-- dataset: {dataset_name}")
-print(f"-- model: {model_name}")
-print(f"-- corruption process: {process_name}")
-print(f"-- corruption integrator: {integrator_name}")
-print(f"-- optimizer: {optimizer_name}")
-print(f"-- loss: {config.loss.cls}")
-print(f"-- training for {config.train.n_epochs} epochs")
-
 # Log initial data samples if visualization is enabled
 if viz_every is not None and viz_every > 0:
     
     data_img = get_data_samples(dataloader_train, normalizer, n_samples=9)
     if data_img:
         wandb.log({"data_samples": data_img, "epoch": 0})
-        print("[cyan]Initial data samples → logged[/cyan]")
 
 print(f"[bold green]*** TRAINING STARTED[/bold green]")
 
@@ -222,8 +210,6 @@ metrics_history = {
 
 average_loss_per_sample = 0.0
 loss_evo = []
-
-# Store last 5 epochs for table display
 
 # Print config once (using rich markup)
 print(f"\n[bold green]{'='*105}[/bold green]")
@@ -313,11 +299,18 @@ if viz_every:
 if hasattr(config.dataset_train, 'normalizer_cls'):
     print(f"  [dim]Normalizer: {config.dataset_train.normalizer_cls}[/dim]")
 
-print(f"\n[bold cyan]TRAINING:[/bold cyan]")
-print(f"  [bold]{'Epoch':<10} {'Loss':<15} {'Status'}[/bold]")
-print(f"  [dim]{'─'*10} {'─'*15} {'─'*10}[/dim]")
+# Check if metrics are enabled for header
+metrics_enabled = getattr(config.eval, 'metrics_every', None) is not None and getattr(config.eval, 'metrics_every', 0) > 0
 
-# Define custom WandB step metric for epoch-based logging
+print(f"\n[bold cyan]TRAINING:[/bold cyan]")
+if metrics_enabled:
+    print(f"  [bold]{'Epoch':<10} {'Loss':<15} {'Stat':<5} {'Metrics'}[/bold]")
+    print(f"  [dim]{'─'*10} {'─'*15} {'─'*5} {'─'*30}[/dim]")
+    print(f"  [cyan]Symbols: ● = viz, ◆ = metrics, ★ = new best[/cyan]")
+else:
+    print(f"  [bold]{'Epoch':<10} {'Loss':<15} {'Status'}[/bold]")
+    print(f"  [dim]{'─'*10} {'─'*15} {'─'*10}[/dim]")
+
 wandb.define_metric("epoch")
 wandb.define_metric("epoch_loss", step_metric="epoch")
 wandb.define_metric("generated_samples", step_metric="epoch")
@@ -361,19 +354,85 @@ for epoch in range(config.train.n_epochs):
         (epoch + 1) > 0  # Don't compute at epoch 0
     )
     
-    # Store epoch data
+    # Compute metrics FIRST (before printing) if needed
+    metrics_str = ""
+    if should_compute_metrics:
+        try:
+            from ml.metrics import compute_metrics_with_model
+            
+            # Get sample count for training metrics (fewer than final eval)
+            n_metric_samples = getattr(config.eval, 'n_metric_samples_training', 500)
+            
+            # Call the reusable metrics function - PASS EXISTING process/integrator
+            metrics = compute_metrics_with_model(
+                config=config,
+                model=model,
+                dataset=dataset,
+                dataloader=dataloader_train,
+                device=DEVICE,
+                log_prefix="training",
+                n_samples=n_metric_samples,
+                log_to_wandb=False,
+                verbose=False,
+                process=proc,  # ← Reuse existing process (no rebuild!)
+                integrator=integrator  # ← Reuse existing integrator
+            )
+            
+            if metrics is not None:
+                # Store in history for plotting
+                metrics_history['epochs'].append(epoch + 1)
+                metrics_history['fid'].append(metrics['fid'])
+                metrics_history['kid_mean'].append(metrics['kid_mean'])
+                metrics_history['kid_std'].append(metrics['kid_std'])
+                metrics_history['w1_pixel'].append(metrics['w1_pixel'])
+                metrics_history['w2_pixel'].append(metrics['w2_pixel'])
+                metrics_history['w1_embedding'].append(metrics['w1_embedding'])
+                metrics_history['w2_embedding'].append(metrics['w2_embedding'])
+                
+                # Track best models by metrics
+                new_best_fid = False
+                new_best_kid = False
+                
+                if metrics['fid'] < best_models['fid']['value']:
+                    best_models['fid']['value'] = metrics['fid']
+                    best_models['fid']['state_dict'] = model.state_dict().copy()
+                    best_models['fid']['epoch'] = epoch + 1
+                    new_best_fid = True
+                
+                if metrics['kid_mean'] < best_models['kid']['value']:
+                    best_models['kid']['value'] = metrics['kid_mean']
+                    best_models['kid']['state_dict'] = model.state_dict().copy()
+                    best_models['kid']['epoch'] = epoch + 1
+                    new_best_kid = True
+                
+                # Build metrics string for inline display
+                if not (torch.isnan(torch.tensor(metrics['fid'])) or torch.isnan(torch.tensor(metrics['kid_mean']))):
+                    fid_str = f"[green]FID:{metrics['fid']:6.2f}[/green]"
+                    if new_best_fid:
+                        fid_str = f"[green bold]FID:{metrics['fid']:6.2f}★[/green bold]"
+                    
+                    kid_str = f"[green]KID:{metrics['kid_mean']:.4f}[/green]"
+                    if new_best_kid:
+                        kid_str = f"[green bold]KID:{metrics['kid_mean']:.4f}★[/green bold]"
+                    
+                    metrics_str = f" {fid_str} {kid_str}"
+                else:
+                    # NaN values - just show "NAN"
+                    metrics_str = f" [yellow]NAN[/yellow]"
+            
+        except Exception as e:
+            metrics_str = f" [red]✗ Metrics failed[/red]"
     
-    # Print simple one-line progress
+    # Print epoch line with metrics inline
     epoch_str = f"{epoch + 1}/{config.train.n_epochs}"
     loss_str = f"{average_loss_per_sample:.6f}"
     status_indicators = []
     if should_visualize:
-        status_indicators.append("[magenta bold]●[/magenta bold]")  # Visualization
+        status_indicators.append("[magenta bold]●[/magenta bold]")
     if should_compute_metrics:
-        status_indicators.append("[cyan bold]◆[/cyan bold]")  # Metrics
+        status_indicators.append("[cyan bold]◆[/cyan bold]")
     status_str = " ".join(status_indicators)
-    print(f"  {epoch_str:<10} {loss_str:<15} {status_str}", flush=True)
-
+    print(f"  {epoch_str:<10} {loss_str:<15} {status_str}{metrics_str}", flush=True)
     
     loss_evo.append(average_loss_per_sample)
     
@@ -395,61 +454,10 @@ for epoch in range(config.train.n_epochs):
             dataset=dataset,
             device=DEVICE,
             n_samples=9,
-            n_steps=config.corruption.corruptor_params.n_steps  # Quick sampling for speed
+            n_steps=config.corruption.corruptor_params.n_steps
         )
         if sample_img:
             log_dict["generated_samples"] = sample_img
-    
-    # Compute metrics periodically if requested
-    if should_compute_metrics:
-        print(f"    [cyan]Computing metrics at epoch {epoch + 1}...[/cyan]", flush=True)
-        try:
-            
-            # Get sample count for training metrics (fewer than final eval)
-            n_metric_samples = getattr(config.eval, 'n_metric_samples_training', 500)
-            
-            # Call the reusable metrics function (DON'T log to WandB)
-            metrics = compute_metrics_with_model(
-                config=config,
-                model=model,
-                dataset=dataset,
-                dataloader=dataloader_train,
-                device=DEVICE,
-                log_prefix="training",
-                n_samples=n_metric_samples,
-                log_to_wandb=False  # ← Don't log during training
-            )
-            
-            if metrics is not None:
-                # Store in history for plotting
-                metrics_history['epochs'].append(epoch + 1)
-                metrics_history['fid'].append(metrics['fid'])
-                metrics_history['kid_mean'].append(metrics['kid_mean'])
-                metrics_history['kid_std'].append(metrics['kid_std'])
-                metrics_history['w1_pixel'].append(metrics['w1_pixel'])
-                metrics_history['w2_pixel'].append(metrics['w2_pixel'])
-                metrics_history['w1_embedding'].append(metrics['w1_embedding'])
-                metrics_history['w2_embedding'].append(metrics['w2_embedding'])
-                
-                # Track best models by metrics
-                if metrics['fid'] < best_models['fid']['value']:
-                    best_models['fid']['value'] = metrics['fid']
-                    best_models['fid']['state_dict'] = model.state_dict().copy()
-                    best_models['fid']['epoch'] = epoch + 1
-                    print(f"    [green]✓ New best FID: {metrics['fid']:.2f} (epoch {epoch + 1})[/green]")
-                
-                if metrics['kid_mean'] < best_models['kid']['value']:
-                    best_models['kid']['value'] = metrics['kid_mean']
-                    best_models['kid']['state_dict'] = model.state_dict().copy()
-                    best_models['kid']['epoch'] = epoch + 1
-                    print(f"    [green]✓ New best KID: {metrics['kid_mean']:.4f} (epoch {epoch + 1})[/green]")
-                
-                print(f"    [green]✓ FID: {metrics['fid']:.2f}, KID: {metrics['kid_mean']:.4f}[/green]", flush=True)
-            
-        except Exception as e:
-            print(f"    [red]✗ Metrics computation failed: {e}[/red]", flush=True)
-            import traceback
-            traceback.print_exc()
     
     wandb.log(log_dict)
     
@@ -502,6 +510,8 @@ if best_models['kid']['state_dict'] is not None:
 if len(metrics_history['epochs']) > 0:
     print("\n[bold green]CREATING METRICS EVOLUTION PLOTS:[/bold green]")
     
+    from utils.eval_plotting import plot_metrics_evolution
+    
     # Combined plot
     metrics_plot_path = os.path.join(run_dir, "metrics_evolution.png")
     plot_metrics_evolution(
@@ -539,37 +549,52 @@ if best_models['kid']['state_dict'] is not None:
     wandb.summary["best_kid_epoch"] = best_models['kid']['epoch']
 
 # =========================================================================
-# EVALUATE ALL BEST MODELS
+# EVALUATE ALL BEST MODELS (BATCH)
 # =========================================================================
 print("\n[bold green]*** STARTING EVALUATION OF BEST MODELS[/bold green]")
 
-# Evaluate best model by loss
-print("\n[bold cyan]Evaluating: Best Model by Loss[/bold cyan]")
-eval_path_loss = os.path.join(run_dir, "eval_best_loss")
-os.makedirs(eval_path_loss, exist_ok=True)
-eval(config, model_path_loss, eval_path_loss, device=DEVICE)
+# Prepare models dictionary for batch evaluation
+models_to_eval = {}
 
-# Evaluate best model by FID (if exists and different from loss)
+# Always evaluate best by loss
+models_to_eval['best_loss'] = {
+    'state_dict_path': model_path_loss,
+    'epoch': best_models['loss']['epoch'],
+    'metric_value': best_loss
+}
+
+# Add best by FID if different
 if best_models['fid']['state_dict'] is not None:
     if best_models['fid']['epoch'] != best_models['loss']['epoch']:
-        print("\n[bold cyan]Evaluating: Best Model by FID[/bold cyan]")
-        eval_path_fid = os.path.join(run_dir, "eval_best_fid")
-        os.makedirs(eval_path_fid, exist_ok=True)
-        eval(config, model_path_fid, eval_path_fid, device=DEVICE)
-    else:
-        print("[yellow]Best FID model is same as best loss model, skipping duplicate eval[/yellow]")
+        models_to_eval['best_fid'] = {
+            'state_dict_path': model_path_fid,
+            'epoch': best_models['fid']['epoch'],
+            'metric_value': best_models['fid']['value']
+        }
 
-# Evaluate best model by KID (if exists and different from others)
+# Add best by KID if different
 if best_models['kid']['state_dict'] is not None:
     if (best_models['kid']['epoch'] != best_models['loss']['epoch'] and
         (best_models['fid']['state_dict'] is None or 
          best_models['kid']['epoch'] != best_models['fid']['epoch'])):
-        print("\n[bold cyan]Evaluating: Best Model by KID[/bold cyan]")
-        eval_path_kid = os.path.join(run_dir, "eval_best_kid")
-        os.makedirs(eval_path_kid, exist_ok=True)
-        eval(config, model_path_kid, eval_path_kid, device=DEVICE)
-    else:
-        print("[yellow]Best KID model is same as another best model, skipping duplicate eval[/yellow]")
+        models_to_eval['best_kid'] = {
+            'state_dict_path': model_path_kid,
+            'epoch': best_models['kid']['epoch'],
+            'metric_value': best_models['kid']['value']
+        }
+
+# Batch evaluate all models (shares dataset, process, integrator!)
+from ml.eval import eval_multiple_models
+eval_multiple_models(
+    config, 
+    models_to_eval, 
+    run_dir, 
+    device=DEVICE,
+    process=proc,  # ← Reuse (no score table rebuild!)
+    integrator=integrator,  # ← Reuse
+    dataset=dataset,  # ← Reuse (no redownload!)
+    dataloader=dataloader_train  # ← Reuse
+)
 
 # plots
 plt.figure()

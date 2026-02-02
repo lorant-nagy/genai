@@ -56,7 +56,7 @@ class SuperlinearLangevin(ItoProcess):
     """
     
     # TRASH MODE: When True, always build a new score table with no dump on disk
-    TRASH_SCORE_TABLE = False
+    TRASH_SCORE_TABLE = True  # ← Changed to True
     
     def __init__(
         self,
@@ -98,13 +98,12 @@ class SuperlinearLangevin(ItoProcess):
             
             # TRASH MODE: Build fresh table without registry or saving
             if self.TRASH_SCORE_TABLE:
-                print(f"[yellow]🗑️  TRASH MODE: Building temporary score table (won't save)[/yellow]")
+                # Build temporary score table silently
                 self.score_table_obj = build_score_table(
                     self, 
                     score_config, 
                     save_path=None  # Don't save
                 )
-                print(f"[green]✓ Temporary score table built (not saved)[/green]")
             else:
                 # Normal mode: use registry system
                 from utils.score_table_registry import ScoreTableRegistry

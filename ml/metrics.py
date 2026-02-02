@@ -77,6 +77,27 @@ def compute_all_metrics(
     real_imgs = real_imgs.to(device)
     gen_imgs = gen_imgs.to(device)
     
+    # Safety check: Check for NaN/Inf
+    if torch.isnan(real_imgs).any() or torch.isinf(real_imgs).any():
+        if verbose:
+            print(f"  [red]✗ Real images contain NaN/Inf[/red]")
+        return {
+            'fid': float('nan'), 'kid_mean': float('nan'), 'kid_std': float('nan'),
+            'w1_pixel': float('nan'), 'w2_pixel': float('nan'),
+            'w1_embedding': float('nan'), 'w2_embedding': float('nan'),
+            'n_real': real_imgs.shape[0], 'n_gen': gen_imgs.shape[0]
+        }
+    
+    if torch.isnan(gen_imgs).any() or torch.isinf(gen_imgs).any():
+        if verbose:
+            print(f"  [red]✗ Generated images contain NaN/Inf[/red]")
+        return {
+            'fid': float('nan'), 'kid_mean': float('nan'), 'kid_std': float('nan'),
+            'w1_pixel': float('nan'), 'w2_pixel': float('nan'),
+            'w1_embedding': float('nan'), 'w2_embedding': float('nan'),
+            'n_real': real_imgs.shape[0], 'n_gen': gen_imgs.shape[0]
+        }
+    
     metrics = {
         'n_real': real_imgs.shape[0],
         'n_gen': gen_imgs.shape[0],
@@ -262,6 +283,10 @@ class InceptionV3Embeddings:
         """
         Preprocess images for Inception V3.
         
+        Handles both backends:
+        - torch_fidelity: Requires uint8 tensors (0-255)
+        - torchvision: Requires float32 tensors with ImageNet normalization
+        
         Args:
             images: (N, C, H, W) in range [-1, 1] or [0, 1]
             
@@ -276,6 +301,9 @@ class InceptionV3Embeddings:
         if images.min() < 0:
             images = (images + 1.0) / 2.0
         
+        # Clamp to [0, 1] to prevent numerical overshoots
+        images = images.clamp(0, 1)
+        
         # Resize to 299x299 (Inception input size)
         if images.shape[-1] != 299 or images.shape[-2] != 299:
             images = F.interpolate(
@@ -285,8 +313,12 @@ class InceptionV3Embeddings:
                 align_corners=False
             )
         
-        # Normalize to ImageNet stats (required for torchvision backend)
-        if self.backend == 'torchvision':
+        # Backend-specific preprocessing
+        if self.backend == 'torch_fidelity':
+            # torch_fidelity requires uint8 tensors (0-255)
+            images = (images * 255).round().clamp(0, 255).to(torch.uint8)
+        else:
+            # torchvision requires float32 with ImageNet normalization
             mean = torch.tensor([0.485, 0.456, 0.406], device=images.device)
             std = torch.tensor([0.229, 0.224, 0.225], device=images.device)
             mean = mean.view(1, 3, 1, 1)
@@ -309,7 +341,18 @@ class InceptionV3Embeddings:
         
         with torch.no_grad():
             if self.backend == 'torch_fidelity':
-                features = self.model(images)['2048']
+                result = self.model(images)
+                
+                # torch_fidelity can return different types:
+                # - dict: {'2048': tensor}
+                # - tuple: (tensor, ...) where first element is features
+                # - tensor: features directly
+                if isinstance(result, dict):
+                    features = result['2048']
+                elif isinstance(result, tuple):
+                    features = result[0]  # First element is features
+                else:
+                    features = result  # Already a tensor
             else:  # torchvision
                 features = self.model(images)
                 
@@ -766,7 +809,10 @@ def compute_metrics_with_model(
     device: str = "cpu",
     log_prefix: str = "best_model",
     n_samples: Optional[int] = None,
-    log_to_wandb: bool = True
+    log_to_wandb: bool = True,
+    verbose: bool = True,
+    process = None,  # ← NEW: reuse existing process
+    integrator = None  # ← NEW: reuse existing integrator
 ) -> Optional[dict]:
     """
     Complete metrics computation pipeline from model and dataset.
@@ -791,6 +837,7 @@ def compute_metrics_with_model(
         log_prefix: WandB prefix ("best_model", "training", etc.)
         n_samples: Number of samples (None = use config.eval.n_metric_samples)
         log_to_wandb: Whether to log metrics to WandB (default: True)
+        verbose: Whether to print progress messages (default: True)
         
     Returns:
         Dictionary of computed metrics, or None if computation fails
@@ -803,7 +850,8 @@ def compute_metrics_with_model(
     from diff.samplers import StationarySampler
     from utils.registry import REGISTRY
     
-    print(f"\n[bold cyan]-------> computing metrics ({log_prefix})[/bold cyan]", flush=True)
+    if verbose:
+        print(f"\n[bold cyan]-------> computing metrics ({log_prefix})[/bold cyan]", flush=True)
     
     # Get configuration
     if n_samples is None:
@@ -813,12 +861,14 @@ def compute_metrics_with_model(
     kid_subset_size = getattr(config.eval, 'kid_subset_size', min(1000, n_samples))
     kid_num_subsets = getattr(config.eval, 'kid_num_subsets', 100)
     
-    print(f"  Collecting {n_samples} samples (batch size: {metric_batch_size})")
+    if verbose:
+        print(f"  Collecting {n_samples} samples (batch size: {metric_batch_size})")
     
     # -------------------------------------------------------------------------
     # 1. COLLECT REAL SAMPLES from dataset
     # -------------------------------------------------------------------------
-    print(f"  [yellow]Collecting real samples...[/yellow]", flush=True)
+    if verbose:
+        print(f"  [yellow]Collecting real samples...[/yellow]", flush=True)
     real_samples = []
     total_collected = 0
     
@@ -832,23 +882,31 @@ def compute_metrics_with_model(
     
     # Concatenate and trim to exact size
     real_samples = torch.cat(real_samples, dim=0)[:n_samples]
-    print(f"  [green]✓ Collected {real_samples.shape[0]} real samples[/green]")
+    if verbose:
+        print(f"  [green]✓ Collected {real_samples.shape[0]} real samples[/green]")
     
     # -------------------------------------------------------------------------
     # 2. GENERATE SAMPLES from reverse diffusion
     # -------------------------------------------------------------------------
-    print(f"  [yellow]Generating samples...[/yellow]", flush=True)
+    if verbose:
+        print(f"  [yellow]Generating samples...[/yellow]", flush=True)
     
-    # Setup reverse process
-    process_name = config.corruption.process_cls
-    process_parameters = config.corruption.process_params
-    table_dir = os.path.join(config.env.results_dir, "score_tables")
-    process_parameters.table_dir = table_dir
-    proc = REGISTRY[process_name](**process_parameters.to_dict())
+    # Setup reverse process (reuse if provided, otherwise create)
+    if process is None:
+        process_name = config.corruption.process_cls
+        process_parameters = config.corruption.process_params
+        table_dir = os.path.join(config.env.results_dir, "score_tables")
+        process_parameters.table_dir = table_dir
+        proc = REGISTRY[process_name](**process_parameters.to_dict())
+    else:
+        proc = process
     
-    integrator_name = config.corruption.integrator_cls
-    integrator_parameters = config.corruption.integrator_params
-    integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+    if integrator is None:
+        integrator_name = config.corruption.integrator_cls
+        integrator_parameters = config.corruption.integrator_params
+        integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+    else:
+        integrator = integrator
     
     CHW = (dataset.C, dataset.H, dataset.W)
     reverse_sde = make_reverse(
@@ -876,11 +934,12 @@ def compute_metrics_with_model(
             generated_samples.append(X_batch[-1])
             n_generated += current_batch_size
             
-            if (n_generated % 100 == 0) or (n_generated == n_samples):
+            if verbose and ((n_generated % 100 == 0) or (n_generated == n_samples)):
                 print(f"    Generated {n_generated}/{n_samples}", flush=True)
     
     generated_samples = torch.cat(generated_samples, dim=0)
-    print(f"  [green]✓ Generated {generated_samples.shape[0]} samples[/green]")
+    if verbose:
+        print(f"  [green]✓ Generated {generated_samples.shape[0]} samples[/green]")
     
     # -------------------------------------------------------------------------
     # 3. COMPUTE METRICS
@@ -893,17 +952,19 @@ def compute_metrics_with_model(
             batch_size=metric_batch_size,
             kid_subset_size=kid_subset_size,
             kid_num_subsets=kid_num_subsets,
-            verbose=True
+            verbose=verbose
         )
         
-        # Print summary
-        print_metrics_summary(metrics)
+        # Print summary (if verbose)
+        if verbose:
+            print_metrics_summary(metrics)
         
         # Log to WandB (optional)
         if log_to_wandb:
             wandb_metrics = {f'{log_prefix}/{k}': v for k, v in metrics.items()}
             wandb.log(wandb_metrics)
-            print(f"  [green]✓ Logged metrics to WandB ({log_prefix}/)[/green]")
+            if verbose:
+                print(f"  [green]✓ Logged metrics to WandB ({log_prefix}/)[/green]")
         
         return metrics
         

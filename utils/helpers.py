@@ -19,6 +19,13 @@ def create_header(metrics_evo: dict, width: int = 15) -> str:
     header = "  " + "".join(f"{k:<{width}}" for k in metrics_evo.keys())
     return f"[bold]{header}[/bold]"
 
+def log_wandb_best(best_models: dict, config):
+    wandb.summary["T"] = float(config.corruption.process_params.T)
+    wandb.summary["power"] = float(config.corruption.process_params.power)
+    for key, info in best_models.items():
+        wandb.summary[f"best_{key}"] = float(info["value"])
+        wandb.summary[f"best_{key}_epoch"] = int(info["epoch"])
+
 
 def build_line(metrics_evo: dict, width: int = 15) -> str:
     cells = []
@@ -66,6 +73,7 @@ def collect_n_images(dataloader, n_images: int, device=None) -> torch.Tensor:
 
 
 def init_wandb(config, petname, rundir):
+
     tags_from_config = getattr(config.wandb, 'tags', [])
     if isinstance(tags_from_config, str):
         tags_from_config = [tags_from_config]
@@ -84,7 +92,8 @@ def init_wandb(config, petname, rundir):
             dir=rundir,
             mode=getattr(config.wandb, 'mode', 'online'),
             notes=getattr(config.wandb, 'notes', ''),
-            tags=tags
+            tags=tags,
+            group=str(config.corruption.process_params.alpha)
         )
     
     wandb.define_metric("epoch")
@@ -101,7 +110,7 @@ def maybe_update_best(key, value, epoch, best_models_dict, model):
         new_best = True
     return new_best
 
-def wandb_log_best(
+def wandb_log_best_and_plot(
     model, proc, config, integrator, stationary_sampler, normalizer, best_models, C, H, W, epoch
 ):
     import matplotlib.pyplot as plt

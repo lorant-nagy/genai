@@ -20,7 +20,8 @@ from utils.helpers import (
     create_header,
     build_line,
     log_wandb_metrics,
-    wandb_log_best
+    wandb_log_best_and_plot,
+    log_wandb_best
 )
 from utils.config import load_cfg
 from utils.registry import REGISTRY
@@ -42,7 +43,7 @@ import ml.normalizer
 
 from ml.eval import METRIC_KEYS
 
-BENCHMARK_METRICS = ["loss", "fid", "kid_mean"]
+BENCHMARK_METRICS = ["loss", "fid", "kid_mean","w1_emb"]
 
 # # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
@@ -211,7 +212,9 @@ for epoch in range(config.train.n_epochs):
 
 # # # # # # # # B L O C K 4 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
-wandb_log_best(
+log_wandb_best(best_models, config)
+
+wandb_log_best_and_plot(
     model=model,
     proc=proc,
     config=config,

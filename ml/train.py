@@ -2,7 +2,6 @@
 import petname
 import wandb
 from rich import print
-import matplotlib.pyplot as plt
 import numpy as np
 
 import argparse
@@ -14,28 +13,26 @@ import torch
 from torch.utils.data import DataLoader
 torch.set_default_dtype(torch.float32)
 
+from utils.helpers import init_wandb, maybe_update_best, collect_n_images, create_header, build_line, log_wandb_metrics
 from utils.config import load_cfg
 from utils.registry import REGISTRY
-from utils.viz import generate_samples
-from utils.viz import get_data_samples
 
-from ml.dataset import RectanglesDataset
-from ml.model import ScoreNet
 from ml.eval import compute_metrics
 
 from diff.corruptor import Corruptor
-from diff.sim_core import SDESolver, ItoProcess
-from diff.sde import VPOU
-from diff.sde import SuperlinearLangevin
+from diff.sim_core import SDESolver
+
 from diff.samplers import StationarySampler
 from diff.reverse import make_reverse
 
-from utils.helpers import init_wandb
-from utils.helpers import maybe_update_best
-from utils.helpers import collect_n_images
-from utils.helpers import create_header
-from utils.helpers import build_line
-from utils.helpers import log_wandb_metrics
+# REGISTRY IMPORTS
+import diff.sde
+import diff.integrator
+import ml.model
+import ml.dataset
+import ml.normalizer
+
+
 
 from ml.eval import METRIC_KEYS
 

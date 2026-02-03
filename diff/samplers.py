@@ -8,8 +8,6 @@ from diff.sim_core import SDESolver
 from utils.registry import REGISTRY
 import copy
 
-# No globals needed - device passed as parameter
-
 class StationarySampler:
     """
     Sample from stationary distribution by running forward SDE from N(0,1).

@@ -72,7 +72,7 @@ def _inception_embeddings(x01: torch.Tensor) -> np.ndarray:
 
 
 def _fid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> float:
-    __name__ = "fid"
+    
     """Standard FID on embeddings using Gaussian approximation."""
     mu_r = feats_r.mean(axis=0)
     mu_g = feats_g.mean(axis=0)
@@ -88,7 +88,7 @@ def _fid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> float:
 
     diff = mu_r - mu_g
     fid = diff @ diff + np.trace(cov_r + cov_g - 2.0 * covmean)
-    return float(fid), __name__
+    return float(fid)
 
 
 def _poly_mmd2_unbiased(X: np.ndarray, Y: np.ndarray, degree=3, coef0=1.0) -> float:

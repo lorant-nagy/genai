@@ -13,7 +13,15 @@ import torch
 from torch.utils.data import DataLoader
 torch.set_default_dtype(torch.float32)
 
-from utils.helpers import init_wandb, maybe_update_best, collect_n_images, create_header, build_line, log_wandb_metrics
+from utils.helpers import (
+    init_wandb,
+    maybe_update_best,
+    collect_n_images,
+    create_header,
+    build_line,
+    log_wandb_metrics,
+    wandb_log_best
+)
 from utils.config import load_cfg
 from utils.registry import REGISTRY
 
@@ -32,11 +40,11 @@ import ml.model
 import ml.dataset
 import ml.normalizer
 
-
-
 from ml.eval import METRIC_KEYS
 
 BENCHMARK_METRICS = ["loss", "fid", "kid_mean"]
+
+# # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
 parser = argparse.ArgumentParser(description="Training script")
 parser.add_argument("config", type=str, help="Path to the config file")
@@ -62,6 +70,8 @@ run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
 table_dir = os.path.join(results_dir, "score_tables")
 os.makedirs(run_dir, exist_ok=True)
 os.makedirs(table_dir, exist_ok=True)
+
+# # # # # # # # B L O C K 2 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
 # dump config
 with open(os.path.join(run_dir, "config.yaml"), "w") as f:
@@ -132,6 +142,8 @@ print_tab_w = 10
 header = create_header(metrics_evo, print_tab_w)
 print(header)
 
+# # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
 for epoch in range(config.train.n_epochs):
 
     loss_sum = 0.0
@@ -156,6 +168,8 @@ for epoch in range(config.train.n_epochs):
     
     metrics_evo['epochs'].append(epoch+1)
     metrics_evo['loss'].append(loss_evo[-1])
+    
+    # # # # # # # # #
     if not do_eval:
         metrics_evo["nan"].append(metrics_evo["nan"][-1] if metrics_evo["nan"] else "-")
         for k in METRIC_KEYS:
@@ -172,6 +186,7 @@ for epoch in range(config.train.n_epochs):
                     x0,
                     n_steps=config.corruption.corruptor_params.n_steps
                 )
+        
         gen_norm = X[-1].detach()
         del X
         gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
@@ -189,9 +204,24 @@ for epoch in range(config.train.n_epochs):
             maybe_update_best(metric, metrics_evo[metric][-1], epoch+1, best_models, model)
 
         log_wandb_metrics(metrics_evo)
+    # # # # # # # # #
 
     line = build_line(metrics_evo, print_tab_w)
     print(line)
+
+# # # # # # # # B L O C K 4 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+wandb_log_best(
+    model=model,
+    proc=proc,
+    config=config,
+    integrator=integrator,
+    stationary_sampler=stationary_sampler,
+    normalizer=normalizer,
+    best_models=best_models,
+    C=dataset.C, H=dataset.H, W=dataset.W,
+    epoch=config.train.n_epochs,
+)
 
 wandb.finish()
 torch.cuda.empty_cache()

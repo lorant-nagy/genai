@@ -3,6 +3,10 @@ import wandb
 import copy
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+from torchvision.utils import make_grid
+from diff.reverse import make_reverse
+from diff.sim_core import SDESolver
 
 def log_wandb_metrics(metrics_evo: dict):
     temp_dict = {}
@@ -96,3 +100,56 @@ def maybe_update_best(key, value, epoch, best_models_dict, model):
         best_models_dict[key]["state_dict"] = copy.deepcopy(model.state_dict())
         new_best = True
     return new_best
+
+def wandb_log_best(
+    model, proc, config, integrator, stationary_sampler, normalizer, best_models, C, H, W, epoch
+):
+    import matplotlib.pyplot as plt
+    from torchvision.utils import make_grid
+    from diff.reverse import make_reverse
+    from diff.sim_core import SDESolver
+
+    N = 64  # hardcoded count (MINIMAL)
+    CHW = (C, H, W)
+
+    was_training = model.training
+    model.eval()
+    orig_sd = copy.deepcopy(model.state_dict())
+
+    reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+    backward_solver = SDESolver(reverse_sde, integrator)
+
+    keys = list(best_models.keys())
+    fig, axes = plt.subplots(len(keys), 1, figsize=(8, 3 * len(keys)))
+    if len(keys) == 1:
+        axes = [axes]
+
+    with torch.no_grad():
+        for ax, k in zip(axes, keys):
+            info = best_models[k]
+            model.load_state_dict(info["state_dict"])
+
+            x0 = stationary_sampler((N, C, H, W))
+            _, X = backward_solver.simulate(x0, n_steps=config.corruption.corruptor_params.n_steps)
+
+            gen_norm = X[-1].detach()
+            del X
+            gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+
+            grid = make_grid(gen_true, nrow=8)  # (C,H,W)
+            img = grid.permute(1, 2, 0).cpu().numpy()
+            if img.shape[2] == 1:
+                img = img[:, :, 0]
+                ax.imshow(img, cmap="gray")
+            else:
+                ax.imshow(img)
+
+            ax.set_title(f"{k} @ epoch {info['epoch']}")
+            ax.axis("off")
+
+    model.load_state_dict(orig_sd)
+    if was_training:
+        model.train()
+
+    wandb.log({"epoch": epoch, "generated_samples_best": wandb.Image(fig)})
+    plt.close(fig)

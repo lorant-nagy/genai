@@ -1,493 +1,234 @@
-from torch.utils.data import DataLoader
-import torch
-
-# Force float32 as default dtype
-torch.set_default_dtype(torch.float32)
-
-import sys
-import os
-import wandb
-
-sys.path.append(os.path.abspath(".."))
-from utils.registry import REGISTRY
-from utils.config import load_cfg
-import argparse
-
-from diff.sim_core import SDESolver
-from diff.reverse import make_reverse
-from diff.integrator import EulerMaruyama
-
-from diff.samplers import StationarySampler
-from utils.eval_plotting import plot_corruption_and_samples, plot_score_table_heatmaps, plot_density_table_heatmaps
-
+#eval.py
 import numpy as np
+import torch
+import torch.nn.functional as F
 
-import matplotlib.pyplot as plt
+import ot  # POT
+from scipy import linalg
+from torchvision.models import inception_v3, Inception_V3_Weights
 
-from ml.dataset import RectanglesDataset
-from ml.model import ScoreNet
-from diff.sde import VPOU
-from diff.corruptor import Corruptor
-from diff.sim_core import SDESolver, ItoProcess
+METRIC_KEYS = ['fid', 'kid_mean', 'kid_std', 'w1_pixel', 'w2_pixel', 'w1_emb', 'w2_emb']
 
-from rich import print
+_INCEPTION_RES = 299
+_INCEPTION_BATCH = 64
+
+_KID_SUBSET_SIZE = 50
+_KID_NUM_SUBSETS = 50
+_KID_DEGREE = 3
+_KID_COEF0 = 1.0
+
+_INCEPTION_MODEL = None  # global cache
 
 
-def eval(config, state_dict_path, eval_path, device="cpu"):
-    print("*** starting evaluation", flush=True)
-    
-    DEVICE = device
+def _as_rgb(x: torch.Tensor) -> torch.Tensor:
+    """Ensure x is (N,3,H,W). If grayscale (N,1,H,W), repeat channels."""
+    if x.ndim != 4:
+        raise ValueError(f"Expected (N,C,H,W), got {tuple(x.shape)}")
+    if x.shape[1] == 1:
+        return x.repeat(1, 3, 1, 1)
+    if x.shape[1] == 3:
+        return x
+    raise ValueError(f"Expected C in {{1,3}}, got C={x.shape[1]}")
 
-    # Create normalizer first
-    normalizer_name = config.dataset_eval.normalizer_cls
-    normalizer_parameters = config.dataset_eval.normalizer_params
-    normalizer = REGISTRY[normalizer_name](**normalizer_parameters.to_dict())
 
-    # Create dataset with normalizer
-    dataset_name = config.dataset_eval.dataset_cls
-    dataset_parameters = config.dataset_eval.dataset_params
-    dataset_parameters.device = DEVICE
-    dataset_parameters.normalizer = normalizer
+def _get_inception(device: torch.device):
+    """Create/cached InceptionV3 that outputs 2048-d embeddings (fc replaced by Identity)."""
+    global _INCEPTION_MODEL
+    if _INCEPTION_MODEL is None:
+        weights = Inception_V3_Weights.DEFAULT
+        m = inception_v3(weights=weights)
+        m.fc = torch.nn.Identity()          # output is 2048-d
+        m.eval()
+        _INCEPTION_MODEL = m
+    return _INCEPTION_MODEL.to(device)
 
-    # Special handling for StationaryDataset
-    # if dataset_name == "StationaryDataset":
-    #     dataset_parameters.corruption_config = config.corruption
-    #     # Don't convert to dict - pass object directly
-    #     dataset = REGISTRY[dataset_name](
-    #         **{k: v for k, v in dataset_parameters.__dict__.items() if k != 'corruption_config'},
-    #         corruption_config=config.corruption
-    #     )
-    # else:
-        
-    dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 
-    # Fit normalizer if needed (should already be fitted from training, but just in case)
-    # if normalizer.needs_fitting:
-    #     print(f"[bold yellow]Fitting normalizer to dataset...[/bold yellow]")
-    #     normalizer.fit(dataset)
-    #     print(f"[bold green]Normalizer fitted[/bold green]")
+def _inception_embeddings(x01: torch.Tensor) -> np.ndarray:
+    """
+    x01: float tensor in [0,1], shape (N,C,H,W) with C=1 or 3.
+    Returns numpy array (N, 2048).
+    """
+    device = x01.device
+    x = _as_rgb(x01).clamp(0, 1)
 
-    # dataloader_parameters = config.dataset_eval.dataloader_params
+    # resize to 299x299
+    if x.shape[-1] != _INCEPTION_RES or x.shape[-2] != _INCEPTION_RES:
+        x = F.interpolate(x, size=(_INCEPTION_RES, _INCEPTION_RES), mode="bilinear", align_corners=False)
 
-    dataloader = DataLoader(dataset, **config.dataloader.to_dict())
-    
+    # ImageNet normalization
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    x = (x - mean) / std
 
-    model_name = config.model.cls
-    model_parameters = config.model.model_params
-    model_parameters.in_channels = dataset.C
-    model = REGISTRY[model_name](**model_parameters.to_dict())
-    state_dict = torch.load(state_dict_path)
-    model.load_state_dict(state_dict)
-    model.to(device=DEVICE)
-    model.eval()
+    m = _get_inception(device)
 
-    os.makedirs(eval_path, exist_ok=True)
+    feats = []
+    with torch.no_grad():
+        for i in range(0, x.shape[0], _INCEPTION_BATCH):
+            y = m(x[i:i + _INCEPTION_BATCH])
+            feats.append(y.detach().cpu())
+    feats = torch.cat(feats, dim=0).numpy().astype(np.float64)
+    return feats
 
-    batch_of_images = next(iter(dataloader))
-    batch_of_images = batch_of_images.to(device=DEVICE)
 
-    process_name = config.corruption.process_cls
-    process_parameters = config.corruption.process_params
-    image_space_dim = dataset.C * dataset.H * dataset.W
+def _fid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> float:
+    __name__ = "fid"
+    """Standard FID on embeddings using Gaussian approximation."""
+    mu_r = feats_r.mean(axis=0)
+    mu_g = feats_g.mean(axis=0)
 
-    table_dir = os.path.join(config.env.results_dir, "score_tables")
-    process_parameters.table_dir = table_dir
+    cov_r = np.cov(feats_r, rowvar=False)
+    cov_g = np.cov(feats_g, rowvar=False)
 
-    proc = REGISTRY[process_name](**process_parameters.to_dict())
+    covmean = linalg.sqrtm(cov_r @ cov_g)
 
-    integrator_name = config.corruption.integrator_cls
-    integrator_parameters = config.corruption.integrator_params
-    integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+    # numerical cleanup
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
 
-    corruptor_parameters = config.corruption.corruptor_params
-    corruptor_parameters.integrator = integrator
-    corruptor_parameters.process = proc
-    # override mode : . \to "trajectory"
-    corruptor_parameters.mode = "trajectory"
-    corruptor = Corruptor(**corruptor_parameters.to_dict())
+    diff = mu_r - mu_g
+    fid = diff @ diff + np.trace(cov_r + cov_g - 2.0 * covmean)
+    return float(fid), __name__
 
-    CHW = (dataset.C, dataset.H, dataset.W)
 
-    n_samples = config.eval.n_samples
-    reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
-    integrator_name = config.corruption.integrator_cls
-    integrator_parameters = config.corruption.integrator_params
-    integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
-    backward_solver = SDESolver(reverse_sde, integrator)
+def _poly_mmd2_unbiased(X: np.ndarray, Y: np.ndarray, degree=3, coef0=1.0) -> float:
+    """
+    Unbiased MMD^2 estimator with polynomial kernel:
+        k(x,y) = (gamma * x^T y + coef0)^degree
+    gamma = 1/d
+    """
+    m = X.shape[0]
+    if Y.shape[0] != m:
+        raise ValueError("KID expects equal number of real and generated features for each subset.")
 
-    print(f"-------> creating stationary sampler", flush=True)
-    stationary_sampler = StationarySampler(config, device=DEVICE, equilibration_factor=5.0)
+    d = X.shape[1]
+    gamma = 1.0 / d
 
-    print(f"-------> sampling from stationary distribution", flush=True)
-    x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
+    Kxx = (gamma * (X @ X.T) + coef0) ** degree
+    Kyy = (gamma * (Y @ Y.T) + coef0) ** degree
+    Kxy = (gamma * (X @ Y.T) + coef0) ** degree
 
-    n_steps = config.corruption.corruptor_params.n_steps
-    print(f"-------> simulating backward trajectories {n_samples} samples with {n_steps} steps", flush=True)
-    with torch.inference_mode():
-        t_grid, X = backward_solver.simulate(
-                    x0,
-                    n_steps=n_steps
-                )
+    # remove diagonals for unbiased estimator
+    np.fill_diagonal(Kxx, 0.0)
+    np.fill_diagonal(Kyy, 0.0)
 
-    print(f"-------> plotting", flush=True)
-    
-    # Get visualization range from normalizer
-    vmin, vmax = normalizer.get_visualization_range()
-    
-    # Determine colormap (grayscale for C=1, none for RGB)
-    cmap = "gray" if dataset.C == 1 else None
+    term_xx = Kxx.sum() / (m * (m - 1))
+    term_yy = Kyy.sum() / (m * (m - 1))
+    term_xy = Kxy.mean() * 2.0
 
-    # Plot corruption and samples (normalizer handles denormalization)
-    plot_corruption_and_samples(
-        corruptor=corruptor,
-        batch_of_data=batch_of_images,  # Pass normalized data
-        eval_path=eval_path,
-        normalizer=normalizer,  # NEW: pass normalizer for denormalization
-        cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
-        max_trajectories=5,
-        sample_grid_count=9,
-        show_time_header=True,
-        mark_t0_indices=True,
-        label_data_sample_indices=True,
-        t_grid=t_grid,
-        X=X[:, :9],  # Pass normalized data
-        n_time_cols=10,
-    )
+    return float(term_xx + term_yy - term_xy)
 
-    # final_samples = X_img_denorm[:, -1]  # Shape: (n_samples, C, H, W)
-    # samples_np = final_samples.cpu().numpy()
 
-    # Plot score table heatmaps if available
-    if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
-        print(f"-------> plotting score table heatmaps", flush=True)
-        plot_score_table_heatmaps(
-            score_table_obj=proc.score_table_obj,
-            process=proc,
-            eval_path=eval_path,
-            n_time_points=10,
-            dpi=150
-        )
-        
-        # Also plot density table if available
-        print(f"-------> plotting density table heatmaps", flush=True)
-        plot_density_table_heatmaps(
-            score_table_obj=proc.score_table_obj,
-            process=proc,
-            eval_path=eval_path,
-            n_time_points=10,
-            dpi=150,
-            log_scale=False  # Linear scale works better for heatmaps (no striping)
-        )
-    else:
-        print(f"-------> score table not available, skipping heatmaps", flush=True)
+def _kid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> (float, float):
+    """
+    KID = mean and std over multiple random subsets.
+    Hardcoded subset size and count.
+    """
+    n = feats_r.shape[0]
+    if feats_g.shape[0] != n:
+        raise ValueError("Real and generated must have same number of embeddings for KID here.")
 
-    # Log all plots to wandb (only if they exist)
-    print(f"-------> logging to wandb", flush=True)
-    
-    plots_to_log = {
-        "backward_final_samples": "backward_final_samples.png",
-        "score_table_heatmaps": "score_table_heatmaps.png",
-        "density_table_heatmaps": "density_table_heatmaps.png",
-        "corruption_trajectories": "corruption_trajectories.png",
-        "reverse_evolution": "reverse_evolution.png",
-        "data_samples": "data_samples.png",
-    }
-    
-    for key, filename in plots_to_log.items():
-        filepath = os.path.join(eval_path, filename)
-        if os.path.exists(filepath):
-            wandb.log({key: wandb.Image(filepath)})
-            print(f"  ✓ Logged {key}")
+    m = _KID_SUBSET_SIZE
+    if n < m:
+        raise ValueError(f"Need at least {_KID_SUBSET_SIZE} samples for KID subsets, got {n}.")
+
+    rng = np.random.default_rng(0)
+    vals = []
+    for _ in range(_KID_NUM_SUBSETS):
+        idx_r = rng.choice(n, size=m, replace=False)
+        idx_g = rng.choice(n, size=m, replace=False)
+        vals.append(_poly_mmd2_unbiased(feats_r[idx_r], feats_g[idx_g], degree=_KID_DEGREE, coef0=_KID_COEF0))
+
+    vals = np.array(vals, dtype=np.float64)
+    return float(vals.mean()), float(vals.std(ddof=1))
+
+
+#v2
+# def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):
+#     X = np.asarray(X, dtype=np.float64)
+#     Y = np.asarray(Y, dtype=np.float64)
+
+#     if X.shape[0] != Y.shape[0]:
+#         raise ValueError("Need same number of samples (minimal helper assumption).")
+#     if not (np.isfinite(X).all() and np.isfinite(Y).all()):
+#         raise ValueError("Non-finite values in OT inputs (NaN/Inf).")
+
+#     # W1 (earth mover with euclidean cost)
+#     W1 = float(ot.solve_sample(X, Y, metric="euclidean").value)
+
+#     # W2 (sqrt of squared-W2 with sqeuclidean cost)
+#     W2_sq = float(ot.solve_sample(X, Y, metric="sqeuclidean").value)
+#     W2 = float(np.sqrt(max(W2_sq, 0.0)))
+
+#     return W1, W2
+
+
+def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):
+    """
+    Exact OT with uniform weights.
+    Returns (W1, W2).
+    W2 computed from squared-euclidean cost: W2 = sqrt(emd2(sqeuclidean)).
+    """
+    n = X.shape[0]
+    if Y.shape[0] != n:
+        raise ValueError("For this minimal helper we assume same number of real and generated samples.")
+
+    a = np.ones(n) / n
+    b = np.ones(n) / n
+
+    M1 = ot.dist(X, Y, metric="euclidean")
+    W1 = ot.emd2(a, b, M1)
+
+    M2 = ot.dist(X, Y, metric="sqeuclidean")
+    W2_sq = ot.emd2(a, b, M2)
+    W2 = np.sqrt(max(W2_sq, 0.0))
+
+    return float(W1), float(W2)
+
+
+def compute_metrics(real_true: torch.Tensor, gen_true: torch.Tensor) -> dict:
+    """
+    Minimal wrapper:
+      - real_true, gen_true are float tensors in [0,1], shape (N,C,H,W), C=1 or 3
+      - returns FID, KID, and POT W1/W2 on pixel and embedding spaces
+    """
+
+    results_dict = {}
+
+    if real_true.shape != gen_true.shape:
+        raise ValueError(f"Shape mismatch: real {tuple(real_true.shape)} vs gen {tuple(gen_true.shape)}")
+
+    # Inception embeddings
+    feats_r = _inception_embeddings(real_true)
+    feats_g = _inception_embeddings(gen_true)
+
+    fid = _fid_from_embeddings(feats_r, feats_g)
+    kid_mean, kid_std = _kid_from_embeddings(feats_r, feats_g)
+
+    # OT on pixel space (flatten)
+    Xr_pix = real_true.detach().cpu().numpy().reshape(real_true.shape[0], -1).astype(np.float64)
+    Xg_pix = gen_true.detach().cpu().numpy().reshape(gen_true.shape[0], -1).astype(np.float64)
+    w1_pix, w2_pix = _w1_w2_pot(Xr_pix, Xg_pix)
+
+    # OT on embedding space
+    w1_emb, w2_emb = _w1_w2_pot(feats_r, feats_g)
+
+    for key in METRIC_KEYS:
+        if key == "fid":
+            results_dict[key] = fid
+        elif key == "kid_mean":
+            results_dict[key] = kid_mean
+        elif key == "kid_std":
+            results_dict[key] = kid_std
+        elif key == "w1_pixel":
+            results_dict[key] = w1_pix
+        elif key == "w2_pixel":
+            results_dict[key] = w2_pix
+        elif key == "w1_emb":
+            results_dict[key] = w1_emb
+        elif key == "w2_emb":
+            results_dict[key] = w2_emb
         else:
-            print(f"  ✗ Skipped {key} (file not found)")
-            
-    
-    # This part is for testing stationary recovery - temoral code - only works with StationaryDataset
-    # if hasattr(config.eval, 'test') and config.eval.test:
-    #     from utils.tests import test_stationary_recovery
-        
-    #     print(f"\n[bold cyan]-------> running stationary recovery test[/bold cyan]", flush=True)
-        
-    #     test_stationary_recovery(
-    #         x0=x0,
-    #         x_final=X[-1],
-    #         config=config,
-    #         save_dir=eval_path,
-    #         device=DEVICE
-    #     )
+            raise ValueError(f"Unknown metric key: {key}")
 
-    
-    # =========================================================================
-    # COMPUTE METRICS using the function from metrics.py
-    # =========================================================================
-    from ml.metrics import compute_metrics_with_model
-    
-    metrics = compute_metrics_with_model(
-        config=config,
-        model=model,
-        dataset=dataset,
-        dataloader=dataloader,
-        device=DEVICE,
-        log_prefix="best_model",
-        n_samples=None  # Use config default
-    )
-    
-    # Save metrics to JSON file
-    if metrics is not None:
-        import json
-        metrics_file = os.path.join(eval_path, "metrics.json")
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics, f, indent=2)
-        print(f"  [green]✓ Saved metrics to {metrics_file}[/green]")
-
-    wandb.run.log({}, commit=True)
-    print("\n[bold green]*** evaluation finished[/bold green]", flush=True)
-
-
-# =============================================================================
-# BATCH EVALUATION - Evaluate multiple models efficiently
-# =============================================================================
-
-def eval_multiple_models(
-    config,
-    models_dict: dict,
-    run_dir: str,
-    device: str = "cpu",
-    process=None,  # ← NEW: reuse process (no score table rebuild!)
-    integrator=None,  # ← NEW: reuse integrator
-    dataset=None,  # ← NEW: reuse dataset (no redownload!)
-    dataloader=None  # ← NEW: reuse dataloader
-):
-    """
-    Evaluate multiple models efficiently by sharing resources.
-    
-    This avoids:
-    - Reloading dataset multiple times
-    - Rebuilding score table multiple times
-    - Recreating process/integrator multiple times
-    
-    Args:
-        config: Configuration object
-        models_dict: Dictionary mapping model_name to:
-            {
-                'state_dict_path': str,  # Path to model weights
-                'epoch': int,            # Epoch number
-                'metric_value': float    # The metric value (for display)
-            }
-        run_dir: Base run directory
-        device: Device to use
-        
-    Example:
-        models_dict = {
-            'best_loss': {
-                'state_dict_path': '/path/to/best_model_loss.pth',
-                'epoch': 87,
-                'metric_value': 0.012345
-            },
-            'best_fid': {
-                'state_dict_path': '/path/to/best_model_fid.pth',
-                'epoch': 20,
-                'metric_value': 38.12
-            }
-        }
-    """
-    from ml.metrics import compute_metrics_with_model
-    
-    print(f"\n[bold green]*** BATCH EVALUATION OF {len(models_dict)} MODELS[/bold green]")
-    
-    DEVICE = device
-    
-    # =========================================================================
-    # 1. SETUP RESOURCES (reuse if provided, otherwise create)
-    # =========================================================================
-    resources_provided = (process is not None and integrator is not None and 
-                         dataset is not None and dataloader is not None)
-    
-    if resources_provided:
-        print(f"[cyan]Reusing shared resources from training[/cyan]\n")
-        proc = process
-        integrator = integrator
-        dataset = dataset
-        dataloader = dataloader
-    else:
-        print(f"[cyan]Creating resources for evaluation[/cyan]")
-        print(f"\n[bold cyan]Setting up resources...[/bold cyan]")
-        
-        # Normalizer
-        normalizer_name = config.dataset_eval.normalizer_cls
-        normalizer_parameters = config.dataset_eval.normalizer_params
-        normalizer = REGISTRY[normalizer_name](**normalizer_parameters.to_dict())
-        
-        # Dataset
-        dataset_name = config.dataset_eval.dataset_cls
-        dataset_parameters = config.dataset_eval.dataset_params
-        dataset_parameters.device = DEVICE
-        dataset_parameters.normalizer = normalizer
-        dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
-        print(f"  ✓ Dataset: {dataset_name}")
-        
-        # Dataloader
-        batch_size = getattr(config.dataloader, 'batch_size', 64)
-        num_workers = getattr(config.dataloader, 'num_workers', 4)
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers
-        )
-        print(f"  ✓ Dataloader: batch_size={batch_size}")
-        
-        # Process (score table built here if creating new)
-        process_name = config.corruption.process_cls
-        process_parameters = config.corruption.process_params
-        table_dir = os.path.join(config.env.results_dir, "score_tables")
-        process_parameters.table_dir = table_dir
-        proc = REGISTRY[process_name](**process_parameters.to_dict())
-        print(f"  ✓ Process: {process_name}")
-        
-        # Integrator
-        integrator_name = config.corruption.integrator_cls
-        integrator_parameters = config.corruption.integrator_params
-        integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
-        print(f"  ✓ Integrator: {integrator_name}")
-        
-        print(f"[green]✓ Resources ready[/green]\n")
-    
-    # Get model config
-    model_name = config.model_train.model_cls
-    model_parameters = config.model_train.model_params
-    
-    # Reverse SDE setup
-    CHW = (dataset.C, dataset.H, dataset.W)
-    n_steps = config.corruption.corruptor_params.n_steps
-    
-    if not resources_provided:
-        print(f"  ✓ Model architecture: {model_name}")
-        print(f"  ✓ Reverse SDE: T={config.corruption.process_params.T}, steps={n_steps}")
-    
-    # Stationary sampler
-    stationary_sampler = StationarySampler(config, device=DEVICE, equilibration_factor=5.0)
-    
-    if not resources_provided:
-        print(f"  ✓ Stationary sampler created")
-        print(f"[green]✓ Resources ready[/green]\n")
-    
-    # =========================================================================
-    # 2. EVALUATE EACH MODEL (reusing resources)
-    # =========================================================================
-    
-    for model_name_key, model_info in models_dict.items():
-        print(f"\n[bold cyan]{'='*70}[/bold cyan]")
-        print(f"[bold cyan]Evaluating: {model_name_key}[/bold cyan]")
-        print(f"  Epoch: {model_info['epoch']}")
-        print(f"  Metric: {model_info.get('metric_value', 'N/A')}")
-        print(f"[bold cyan]{'='*70}[/bold cyan]\n")
-        
-        # Create output directory
-        eval_path = os.path.join(run_dir, f"eval_{model_name_key}")
-        os.makedirs(eval_path, exist_ok=True)
-        
-        # Load model weights
-        state_dict_path = model_info['state_dict_path']
-        state_dict = torch.load(state_dict_path, map_location=DEVICE)
-        model = REGISTRY[model_name](**model_parameters.to_dict())
-        model.load_state_dict(state_dict)
-        model.to(DEVICE)
-        model.eval()
-        print(f"  ✓ Loaded model from {os.path.basename(state_dict_path)}")
-        
-        # Create reverse SDE with this model
-        reverse_sde = make_reverse(
-            proc,
-            model,
-            config.corruption.process_params.T,
-            **config.reverse_params.to_dict(),
-            CHW=CHW
-        )
-        backward_solver = SDESolver(reverse_sde, integrator)
-        
-        # Generate samples for visualization
-        print(f"  Generating samples for visualization...")
-        n_samples_viz = 16
-        with torch.no_grad():
-            x0_batch = stationary_sampler((n_samples_viz, dataset.C, dataset.H, dataset.W))
-            t_grid, X = backward_solver.simulate(x0_batch, n_steps=n_steps)
-        
-        # Plot corruption trajectories
-        print(f"  Creating plots...")
-        plot_corruption_and_samples(
-            X_traj=X,
-            t_grid=t_grid,
-            normalizer=normalizer,
-            title=f"Backward Evolution - {model_name_key} (epoch {model_info['epoch']})",
-            save_path=os.path.join(eval_path, "backward_evolution.png"),
-            n_samples=min(9, n_samples_viz)
-        )
-        
-        # Plot final samples
-        final_samples = X[-1][:min(16, n_samples_viz)]
-        denorm_samples = normalizer.denormalize(final_samples)
-        
-        fig, axes = plt.subplots(4, 4, figsize=(10, 10))
-        for i, ax in enumerate(axes.flat):
-            if i < len(denorm_samples):
-                img = denorm_samples[i].cpu().squeeze()
-                ax.imshow(img, cmap='gray' if dataset.C == 1 else None)
-                ax.axis('off')
-            else:
-                ax.axis('off')
-        plt.suptitle(f"Final Samples - {model_name_key} (epoch {model_info['epoch']})", fontsize=14)
-        plt.tight_layout()
-        plt.savefig(os.path.join(eval_path, "backward_final_samples.png"), dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        # Plot score table (if available)
-        if hasattr(proc, 'score_table_obj') and proc.score_table_obj is not None:
-            try:
-                plot_score_table_heatmaps(
-                    proc.score_table_obj,
-                    title_prefix=f"{model_name_key} (epoch {model_info['epoch']})",
-                    save_path=os.path.join(eval_path, "score_table_heatmaps.png")
-                )
-                plot_density_table_heatmaps(
-                    proc.score_table_obj,
-                    title_prefix=f"{model_name_key} (epoch {model_info['epoch']})",
-                    save_path=os.path.join(eval_path, "density_table_heatmaps.png")
-                )
-            except Exception as e:
-                print(f"  [yellow]Warning: Could not plot score/density tables: {e}[/yellow]")
-        
-        # Compute metrics (reusing process/integrator!)
-        print(f"  Computing metrics...")
-        metrics = compute_metrics_with_model(
-            config=config,
-            model=model,
-            dataset=dataset,
-            dataloader=dataloader,
-            device=DEVICE,
-            log_prefix=f"best_model_{model_name_key}",
-            n_samples=None,  # Use config default
-            log_to_wandb=True,
-            verbose=True,
-            process=proc,  # ← Reuse!
-            integrator=integrator  # ← Reuse!
-        )
-        
-        # Save metrics
-        if metrics is not None:
-            import json
-            metrics_file = os.path.join(eval_path, "metrics.json")
-            # Add model info
-            metrics['model_name'] = model_name_key
-            metrics['epoch'] = model_info['epoch']
-            with open(metrics_file, 'w') as f:
-                json.dump(metrics, f, indent=2)
-            print(f"  [green]✓ Saved metrics to {metrics_file}[/green]")
-        
-        print(f"[green]✓ {model_name_key} evaluation complete[/green]")
-    
-    print(f"\n[bold green]{'='*70}[/bold green]")
-    print(f"[bold green]✓ BATCH EVALUATION COMPLETE[/bold green]")
-    print(f"[bold green]{'='*70}[/bold green]\n")
+    return results_dict

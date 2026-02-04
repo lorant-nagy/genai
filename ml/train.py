@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 torch.set_default_dtype(torch.float32)
 
+from utils.viz import generate_samples
 from utils.helpers import (
     init_wandb,
     maybe_update_best,
@@ -21,7 +22,9 @@ from utils.helpers import (
     build_line,
     log_wandb_metrics,
     wandb_log_best_and_plot,
-    log_wandb_best
+    log_wandb_best,
+    fill_metrics_results,
+    dump_dict_to_json
 )
 from utils.config import load_cfg
 from utils.registry import REGISTRY
@@ -67,7 +70,7 @@ time_str = os.popen("date +%Y%m%d_%H%M%S").read().strip()
 
 metrics_freq = config.eval.metrics_freq
 results_dir = config.env.results_dir
-run_dir = os.path.join(results_dir, "runs", petname_str + "_" + time_str)
+run_dir = os.path.join(results_dir, "runs", config.env.results_subdir, petname_str + "_" + time_str)
 table_dir = os.path.join(results_dir, "score_tables")
 os.makedirs(run_dir, exist_ok=True)
 os.makedirs(table_dir, exist_ok=True)
@@ -134,12 +137,11 @@ print(f"\n[bold cyan]TRAINING:[/bold cyan]")
 
 average_loss_per_sample = 0.0
 loss_evo = []
-do_eval = None
 
 real_norm = collect_n_images(dataloader, config.eval.n_metric_samples, device=DEVICE)
 real_true = normalizer.denormalize(real_norm).clamp(0, 1)
 
-print_tab_w = 10
+print_tab_w =16
 header = create_header(metrics_evo, print_tab_w)
 print(header)
 
@@ -164,48 +166,53 @@ for epoch in range(config.train.n_epochs):
     
     average_loss_per_sample = loss_sum / len(dataloader)
     loss_evo.append(average_loss_per_sample)
-
-    do_eval = ((epoch + 1) % metrics_freq == 0)
     
     metrics_evo['epochs'].append(epoch+1)
     metrics_evo['loss'].append(loss_evo[-1])
     
-    # # # # # # # # #
-    if not do_eval:
-        metrics_evo["nan"].append(metrics_evo["nan"][-1] if metrics_evo["nan"] else "-")
-        for k in METRIC_KEYS:
-            metrics_evo[k].append(metrics_evo[k][-1] if metrics_evo[k] else float("nan"))
-    else:
-        model.eval()
-        CHW = (dataset.C, dataset.H, dataset.W)
-        reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
-        backward_solver = SDESolver(reverse_sde, integrator)
+    # # e v a l  s u b - b l o c k # # # # # # #
+    model.eval()
+    CHW = (dataset.C, dataset.H, dataset.W)
+    reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+    backward_solver = SDESolver(reverse_sde, integrator)
 
-        x0 = stationary_sampler((config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W))
+    x0 = stationary_sampler((config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W))
 
-        t_grid, X = backward_solver.simulate(
-                    x0,
-                    n_steps=config.corruption.corruptor_params.n_steps
-                )
-        
-        gen_norm = X[-1].detach()
-        del X
-        gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+    t_grid, X = backward_solver.simulate(
+                x0,
+                n_steps=config.corruption.corruptor_params.n_steps
+            )
+    
+    gen_norm = X[-1].detach()
+    del X
+    gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
 
-        metrics_results = compute_metrics(real_true, gen_true)
-        for key, value in metrics_results.items():
-            metrics_evo[key].append(value)
+    metrics_results = compute_metrics(real_true, gen_true)
 
-        has_bad = any(not np.isfinite(v) for v in metrics_results.values())
-        metrics_evo["nan"].append("NaN" if has_bad else "")
+    fill_metrics_results(metrics_evo, metrics_results)
 
-        model.train()
+    sample_grid = generate_samples(
+        model=model,
+        process=proc,
+        integrator=integrator,
+        normalizer=normalizer,
+        config=config,
+        dataset=dataset,
+        device=DEVICE,
+        n_samples=9,
+        n_steps=config.corruption.corruptor_params.n_steps
+    )
+    
+    model.train()
+    # #e n d  o f  e v a l  s u b - b l o c k # # # # # # #
 
-        for metric in BENCHMARK_METRICS:
-            maybe_update_best(metric, metrics_evo[metric][-1], epoch+1, best_models, model)
+    if sample_grid is not None:
+        wandb.log({"generated_samples": sample_grid, "epoch": epoch + 1})
 
-        log_wandb_metrics(metrics_evo)
-    # # # # # # # # #
+    for metric in BENCHMARK_METRICS:
+        maybe_update_best(metric, metrics_evo[metric][-1], epoch+1, best_models, model)
+
+    log_wandb_metrics(metrics_evo)
 
     line = build_line(metrics_evo, print_tab_w)
     print(line)
@@ -225,6 +232,8 @@ wandb_log_best_and_plot(
     C=dataset.C, H=dataset.H, W=dataset.W,
     epoch=config.train.n_epochs,
 )
+
+dump_dict_to_json(metrics_evo, dir=run_dir, filename="metrics_evo.json")
 
 wandb.finish()
 torch.cuda.empty_cache()

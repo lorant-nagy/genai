@@ -1,4 +1,5 @@
 #helpers.py
+from ml.eval import METRIC_KEYS
 import wandb
 import copy
 import torch
@@ -7,6 +8,8 @@ import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
 from diff.reverse import make_reverse
 from diff.sim_core import SDESolver
+import json
+import os
 
 def log_wandb_metrics(metrics_evo: dict):
     temp_dict = {}
@@ -15,26 +18,26 @@ def log_wandb_metrics(metrics_evo: dict):
             temp_dict[key] = metrics_evo[key][-1]
     wandb.log(temp_dict)
 
-def create_header(metrics_evo: dict, width: int = 15) -> str:
+def create_header(metrics_evo: dict, width = None) -> str:
     header = "  " + "".join(f"{k:<{width}}" for k in metrics_evo.keys())
     return f"[bold]{header}[/bold]"
 
 def log_wandb_best(best_models: dict, config):
     wandb.summary["T"] = float(config.corruption.process_params.T)
-    wandb.summary["power"] = float(config.corruption.process_params.power)
+    wandb.summary["power"] = float(config.corruption.process_params.alpha)
     for key, info in best_models.items():
         wandb.summary[f"best_{key}"] = float(info["value"])
         wandb.summary[f"best_{key}_epoch"] = int(info["epoch"])
 
 
-def build_line(metrics_evo: dict, width: int = 15) -> str:
+def build_line(metrics_evo: dict, width = None, METRIC_KEYS = METRIC_KEYS) -> str:
     cells = []
     for k in metrics_evo.keys():
         v_list = metrics_evo[k]
-        v = v_list[-1] if v_list else ""
+        v = v_list[-1] if v_list else "-"
 
         if isinstance(v, (float, np.floating)):
-            cells.append(f"{v:<{width}.4f}")
+            cells.append(f"{v:<{width}.14f}")
         elif isinstance(v, int):
             cells.append(f"{v:<{width}d}")
         else:
@@ -162,3 +165,43 @@ def wandb_log_best_and_plot(
 
     wandb.log({"epoch": epoch, "generated_samples_best": wandb.Image(fig)})
     plt.close(fig)
+
+def fill_metrics_results(metrics_evo, metrics_results):
+    for key, value in metrics_results.items():
+        metrics_evo[key].append(value)
+    has_bad = any(not np.isfinite(v) for v in metrics_results.values())
+    metrics_evo["nan"].append("NaN" if has_bad else "")
+
+# def save_metrics_evo(metrics_evo: dict, run_dir: str, filename: str = "metrics_evo.json"):
+
+#     filepath = os.path.join(run_dir, filename)
+    
+#     # Convert numpy types to native Python types
+#     metrics_clean = {}
+#     for key, values in metrics_evo.items():
+#         metrics_clean[key] = [
+#             float(v) if isinstance(v, (np.floating, np.integer)) 
+#             else int(v) if isinstance(v, (np.int_, np.intc, np.intp))
+#             else v
+#             for v in values
+#         ]
+    
+#     with open(filepath, "w") as f:
+#         json.dump(metrics_clean, f, indent=2)
+    
+#     return filepath
+
+def dump_dict_to_json(data_dict: dict, dir: str, filename: str = "data_dict.json"):
+    filepath = os.path.join(dir, filename)
+    
+    data_clean = {}
+    for key, value in data_dict.items():
+        if isinstance(value, (np.floating, np.integer)):
+            data_clean[key] = float(value) if isinstance(value, np.floating) else int(value)
+        else:
+            data_clean[key] = value
+    
+    with open(filepath, "w") as f:
+        json.dump(data_clean, f, indent=2)
+    
+    return filepath

@@ -59,7 +59,10 @@ class SDESolver:
 
         # RNG
         rng = torch.Generator(device=self.device)
-        if seed is not None:
+
+        if seed is None:
+            rng.seed()
+        else:
             rng.manual_seed(int(seed))
 
         # Simulate

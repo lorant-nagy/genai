@@ -132,7 +132,8 @@ def _kid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> (float, fl
     if n < m:
         raise ValueError(f"Need at least {_KID_SUBSET_SIZE} samples for KID subsets, got {n}.")
 
-    rng = np.random.default_rng(0)
+    # rng = np.random.default_rng(0)
+    rng = np.random.default_rng()
     vals = []
     for _ in range(_KID_NUM_SUBSETS):
         idx_r = rng.choice(n, size=m, replace=False)
@@ -161,6 +162,36 @@ def _kid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> (float, fl
 #     W2 = float(np.sqrt(max(W2_sq, 0.0)))
 
 #     return W1, W2
+
+
+# v3 - sinkhorn
+# def _w1_w2_sinkhorn(X: np.ndarray, Y: np.ndarray, reg: float = 0.1) -> (float, float):
+#        a = np.ones(X.shape[0]) / X.shape[0]
+#        b = np.ones(Y.shape[0]) / Y.shape[0]
+       
+#        M1 = ot.dist(X, Y, metric="euclidean")
+#        W1 = ot.sinkhorn2(a, b, M1, reg=reg)
+       
+#        M2 = ot.dist(X, Y, metric="sqeuclidean")
+#        W2_sq = ot.sinkhorn2(a, b, M2, reg=reg)
+#        return float(W1), float(np.sqrt(max(W2_sq, 0.0)))
+
+# v4 regularised
+
+# def _w1_w2_pot(X: np.ndarray, Y: np.ndarray, reg: float = 0.05) -> (float, float):
+#     n = X.shape[0]
+#     a = np.ones(n) / n
+#     b = np.ones(n) / n
+    
+#     # Use entropic regularization for stability
+#     M1 = ot.dist(X, Y, metric="euclidean")
+#     W1 = ot.sinkhorn2(a, b, M1, reg=reg)
+    
+#     M2 = ot.dist(X, Y, metric="sqeuclidean")
+#     W2_sq = ot.sinkhorn2(a, b, M2, reg=reg)
+#     W2 = np.sqrt(max(W2_sq, 0.0))
+    
+#     return float(W1), float(W2)
 
 
 def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):

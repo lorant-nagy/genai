@@ -56,7 +56,8 @@ class SuperlinearLangevin(ItoProcess):
     """
     
     # TRASH MODE: When True, always build a new score table with no dump on disk
-    TRASH_SCORE_TABLE = True  # ← Changed to True
+    # TRASH_SCORE_TABLE = True  # ← Changed to True
+    TRASH_SCORE_TABLE = False
     
     def __init__(
         self,

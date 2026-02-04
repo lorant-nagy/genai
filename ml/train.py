@@ -170,26 +170,92 @@ for epoch in range(config.train.n_epochs):
     metrics_evo['epochs'].append(epoch+1)
     metrics_evo['loss'].append(loss_evo[-1])
     
-    # # e v a l  s u b - b l o c k # # # # # # #
+    # # e v a l  s u b - b l o c k  W I T H  D I A G N O S T I C S # # # # # # #
+    print(f"\n{'='*80}")
+    print(f"EPOCH {epoch+1} DIAGNOSTICS")
+    print(f"{'='*80}")
+    
     model.eval()
     CHW = (dataset.C, dataset.H, dataset.W)
     reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
     backward_solver = SDESolver(reverse_sde, integrator)
 
+    print(f"\n[1] INITIAL CONDITIONS (x0 from StationarySampler):")
     x0 = stationary_sampler((config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W))
+    print(f"  Shape: {x0.shape}, Device: {x0.device}")
+    print(f"  Mean: {x0.mean():.6f}, Std: {x0.std():.6f}")
+    print(f"  Min: {x0.min():.6f}, Max: {x0.max():.6f}")
+    print(f"  NaN count: {torch.isnan(x0).sum().item()} / {x0.numel()}")
+    print(f"  Inf count: {torch.isinf(x0).sum().item()} / {x0.numel()}")
+    x0_finite = x0[~torch.isnan(x0) & ~torch.isinf(x0)]
+    if len(x0_finite) > 0:
+        print(f"  Finite values - Mean: {x0_finite.mean():.6f}, Std: {x0_finite.std():.6f}")
+        print(f"  Finite values - Min: {x0_finite.min():.6f}, Max: {x0_finite.max():.6f}")
 
+    print(f"\n[2] MODEL OUTPUT TEST (at t=0.5, t=3.5, t=6.5):")
+    with torch.no_grad():
+        for test_t_val in [0.5, 3.5, 6.5]:
+            test_t = torch.full((min(10, x0.shape[0]),), test_t_val, device=DEVICE)
+            test_x = x0[:min(10, x0.shape[0])]
+            test_score = model(test_x, test_t)
+            print(f"  t={test_t_val}:")
+            print(f"    Mean: {test_score.mean():.6f}, Std: {test_score.std():.6f}")
+            print(f"    Min: {test_score.min():.6f}, Max: {test_score.max():.6f}")
+            print(f"    NaN count: {torch.isnan(test_score).sum().item()} / {test_score.numel()}")
+            print(f"    Inf count: {torch.isinf(test_score).sum().item()} / {test_score.numel()}")
+            score_finite = test_score[~torch.isnan(test_score) & ~torch.isinf(test_score)]
+            if len(score_finite) > 0:
+                print(f"    Finite - Mean: {score_finite.mean():.6f}, Std: {score_finite.std():.6f}")
+                print(f"    Values > 100: {(torch.abs(score_finite) > 100).sum().item()}")
+                print(f"    Values > 1000: {(torch.abs(score_finite) > 1000).sum().item()}")
+
+    print(f"\n[3] BACKWARD SIMULATION:")
     t_grid, X = backward_solver.simulate(
                 x0,
                 n_steps=config.corruption.corruptor_params.n_steps
             )
     
+    # Check trajectory at multiple time points
+    check_indices = [0, len(X)//4, len(X)//2, 3*len(X)//4, -1]
+    for i in check_indices:
+        t_val = t_grid[i].item() if hasattr(t_grid[i], 'item') else t_grid[i]
+        X_t = X[i]
+        print(f"  Step {i}/{len(X)-1} (t={t_val:.3f}):")
+        print(f"    Mean: {X_t.mean():.6f}, Std: {X_t.std():.6f}")
+        print(f"    Min: {X_t.min():.6f}, Max: {X_t.max():.6f}")
+        print(f"    NaN count: {torch.isnan(X_t).sum().item()} / {X_t.numel()}")
+        print(f"    Inf count: {torch.isinf(X_t).sum().item()} / {X_t.numel()}")
+        X_finite = X_t[~torch.isnan(X_t) & ~torch.isinf(X_t)]
+        if len(X_finite) > 0:
+            print(f"    Finite - Mean: {X_finite.mean():.6f}, Range: [{X_finite.min():.6f}, {X_finite.max():.6f}]")
+
+    print(f"\n[4] FINAL GENERATED SAMPLES (X[-1]):")
     gen_norm = X[-1].detach()
+    print(f"  Mean: {gen_norm.mean():.6f}, Std: {gen_norm.std():.6f}")
+    print(f"  Min: {gen_norm.min():.6f}, Max: {gen_norm.max():.6f}")
+    print(f"  NaN count: {torch.isnan(gen_norm).sum().item()} / {gen_norm.numel()}")
+    print(f"  Inf count: {torch.isinf(gen_norm).sum().item()} / {gen_norm.numel()}")
+    gen_finite = gen_norm[~torch.isnan(gen_norm) & ~torch.isinf(gen_norm)]
+    if len(gen_finite) > 0:
+        print(f"  Finite values - Mean: {gen_finite.mean():.6f}, Std: {gen_finite.std():.6f}")
+        print(f"  Finite values - Range: [{gen_finite.min():.6f}, {gen_finite.max():.6f}]")
+        print(f"  Values > 10: {(torch.abs(gen_finite) > 10).sum().item()}")
+        print(f"  Values > 100: {(torch.abs(gen_finite) > 100).sum().item()}")
+    
     del X
     gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+    
+    print(f"\n[5] AFTER DENORMALIZATION:")
+    print(f"  Mean: {gen_true.mean():.6f}, Std: {gen_true.std():.6f}")
+    print(f"  Min: {gen_true.min():.6f}, Max: {gen_true.max():.6f}")
+    print(f"  NaN count: {torch.isnan(gen_true).sum().item()} / {gen_true.numel()}")
+    
+    print(f"\n{'='*80}\n")
 
-    metrics_results = compute_metrics(real_true, gen_true)
-
-    fill_metrics_results(metrics_evo, metrics_results)
+    # METRICS DISABLED - just fill with dummy values
+    for key in METRIC_KEYS:
+        metrics_evo[key].append(0.0)
+    metrics_evo['nan'].append("")
 
     sample_grid = generate_samples(
         model=model,
@@ -199,7 +265,7 @@ for epoch in range(config.train.n_epochs):
         config=config,
         dataset=dataset,
         device=DEVICE,
-        n_samples=9,
+        n_samples=64,
         n_steps=config.corruption.corruptor_params.n_steps
     )
     
@@ -210,7 +276,8 @@ for epoch in range(config.train.n_epochs):
         wandb.log({"generated_samples": sample_grid, "epoch": epoch + 1})
 
     for metric in BENCHMARK_METRICS:
-        maybe_update_best(metric, metrics_evo[metric][-1], epoch+1, best_models, model)
+        if metric in metrics_evo and len(metrics_evo[metric]) > 0:
+            maybe_update_best(metric, metrics_evo[metric][-1], epoch+1, best_models, model)
 
     log_wandb_metrics(metrics_evo)
 

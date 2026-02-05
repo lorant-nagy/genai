@@ -14,6 +14,9 @@ from datetime import datetime
 import random
 
 
+LOG_FILE = Path("/data/lorantnagy/storage/genai/runs/global_logs/sweep_log.txt")
+
+
 def find_configs(config_dir):
     """Find all .yml files in directory."""
     config_dir = Path(config_dir)
@@ -71,16 +74,29 @@ def main():
     failed = []
     succeeded = []
     
+    # Create log file with header for this sweep
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(f"\n{'='*80}\n")
+        f.write(f"SWEEP STARTED: {start_time.strftime('%Y-%m-%d %H:%M:%S')} | Device: {args.device} | Configs: {len(configs)}\n")
+        f.write(f"{'='*80}\n")
+    
     for i, config_path in enumerate(configs):
         print(f"\n[{i+1}/{len(configs)}]")
         returncode = run_config_in_docker(config_path, args.device, args.compose_file)
         
+        # Log result immediately
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if returncode != 0:
             print(f"FAILED: {config_path.name}")
             failed.append(config_path.name)
+            with open(LOG_FILE, "a") as f:
+                f.write(f"[{timestamp}] FAILED: {config_path.name}\n")
         else:
             print(f"SUCCESS: {config_path.name}")
             succeeded.append(config_path.name)
+            with open(LOG_FILE, "a") as f:
+                f.write(f"[{timestamp}] SUCCESS: {config_path.name}\n")
     
     end_time = datetime.now()
     duration = end_time - start_time
@@ -105,6 +121,10 @@ def main():
             print(f"  ✗ {name}")
     
     print(f"{'='*80}")
+    
+    # Write summary to log
+    with open(LOG_FILE, "a") as f:
+        f.write(f"SWEEP ENDED: {end_time.strftime('%Y-%m-%d %H:%M:%S')} | Duration: {duration} | Success: {len(succeeded)}/{len(configs)}\n")
     
     sys.exit(1 if failed else 0)
 

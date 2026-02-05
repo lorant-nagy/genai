@@ -7,7 +7,8 @@ import ot  # POT
 from scipy import linalg
 from torchvision.models import inception_v3, Inception_V3_Weights
 
-METRIC_KEYS = ['fid', 'kid_mean', 'kid_std', 'w1_pixel', 'w2_pixel', 'w1_emb', 'w2_emb']
+METRIC_KEYS = ['fid', 'kid_mean', 'w1_emb']
+# METRIC_KEYS = ['fid', 'kid_mean', 'kid_std', 'w1_pixel', 'w2_pixel', 'w1_emb', 'w2_emb']
 
 _INCEPTION_RES = 299
 _INCEPTION_BATCH = 64
@@ -217,49 +218,36 @@ def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):
     return float(W1), float(W2)
 
 
-def compute_metrics(real_true: torch.Tensor, gen_true: torch.Tensor) -> dict:
-    """
-    Minimal wrapper:
-      - real_true, gen_true are float tensors in [0,1], shape (N,C,H,W), C=1 or 3
-      - returns FID, KID, and POT W1/W2 on pixel and embedding spaces
-    """
+def compute_metrics(real_true, gen_true):
+    keys = set(METRIC_KEYS)
+    results = {}
 
-    results_dict = {}
+    need_emb = any(k in keys for k in ["fid", "kid_mean", "kid_std", "w1_emb", "w2_emb"])
+    need_pix = any(k in keys for k in ["w1_pixel", "w2_pixel"])
 
-    if real_true.shape != gen_true.shape:
-        raise ValueError(f"Shape mismatch: real {tuple(real_true.shape)} vs gen {tuple(gen_true.shape)}")
+    feats_r = feats_g = None
+    if need_emb:
+        feats_r = _inception_embeddings(real_true)
+        feats_g = _inception_embeddings(gen_true)
 
-    # Inception embeddings
-    feats_r = _inception_embeddings(real_true)
-    feats_g = _inception_embeddings(gen_true)
+    if "fid" in keys:
+        results["fid"] = _fid_from_embeddings(feats_r, feats_g)
 
-    fid = _fid_from_embeddings(feats_r, feats_g)
-    kid_mean, kid_std = _kid_from_embeddings(feats_r, feats_g)
+    if ("kid_mean" in keys) or ("kid_std" in keys):
+        km, ks = _kid_from_embeddings(feats_r, feats_g)
+        if "kid_mean" in keys: results["kid_mean"] = km
+        if "kid_std"  in keys: results["kid_std"]  = ks
 
-    # OT on pixel space (flatten)
-    Xr_pix = real_true.detach().cpu().numpy().reshape(real_true.shape[0], -1).astype(np.float64)
-    Xg_pix = gen_true.detach().cpu().numpy().reshape(gen_true.shape[0], -1).astype(np.float64)
-    w1_pix, w2_pix = _w1_w2_pot(Xr_pix, Xg_pix)
+    if need_pix:
+        Xr = real_true.detach().cpu().numpy().reshape(real_true.shape[0], -1).astype(np.float64)
+        Xg = gen_true.detach().cpu().numpy().reshape(gen_true.shape[0], -1).astype(np.float64)
+        w1p, w2p = _w1_w2_pot(Xr, Xg)
+        if "w1_pixel" in keys: results["w1_pixel"] = w1p
+        if "w2_pixel" in keys: results["w2_pixel"] = w2p
 
-    # OT on embedding space
-    w1_emb, w2_emb = _w1_w2_pot(feats_r, feats_g)
+    if ("w1_emb" in keys) or ("w2_emb" in keys):
+        w1e, w2e = _w1_w2_pot(feats_r, feats_g)
+        if "w1_emb" in keys: results["w1_emb"] = w1e
+        if "w2_emb" in keys: results["w2_emb"] = w2e
 
-    for key in METRIC_KEYS:
-        if key == "fid":
-            results_dict[key] = fid
-        elif key == "kid_mean":
-            results_dict[key] = kid_mean
-        elif key == "kid_std":
-            results_dict[key] = kid_std
-        elif key == "w1_pixel":
-            results_dict[key] = w1_pix
-        elif key == "w2_pixel":
-            results_dict[key] = w2_pix
-        elif key == "w1_emb":
-            results_dict[key] = w1_emb
-        elif key == "w2_emb":
-            results_dict[key] = w2_emb
-        else:
-            raise ValueError(f"Unknown metric key: {key}")
-
-    return results_dict
+    return results

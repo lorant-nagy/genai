@@ -22,6 +22,53 @@ from utils.registry import register
 from ml.normalizer import Normalizer
 from diff.samplers import generate_random_side_rectangles
 
+@register
+class MNIST1Dataset(torch.utils.data.Dataset):
+    """MNIST dataset with all digits (0-9) - always downloads fresh"""
+    
+    def __init__(self, data_root=None, image_size=28, split="train", normalizer=None, interpolation=None, **kwargs):
+        from torchvision import datasets, transforms
+        import tempfile
+        
+        # Ignore data_root from config, use temp directory
+        temp_dir = tempfile.mkdtemp()
+        
+        # Load MNIST (downloads automatically)
+        is_train = (split == "train")
+        mnist = datasets.MNIST(
+            root=temp_dir,
+            train=is_train,
+            download=True
+        )
+        
+        # Keep all digits (no filtering)
+        self.data = [mnist[i][0] for i in range(len(mnist))]
+        
+        print(f"MNIST1Dataset initialized:")
+        print(f"  - Split: {split}")
+        print(f"  - Total digits: {len(self.data)}")
+        print(f"  - Image size: {image_size}x{image_size}")
+        
+        # Setup transforms
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor()
+        ])
+        
+        self.normalizer = normalizer
+        self.C = 1  # Grayscale
+        self.H = image_size
+        self.W = image_size
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        img = self.data[idx]
+        img = self.transform(img)
+        img = self.normalizer.normalize(img)
+        return img
+
 
 @register
 class RectanglesDataset(Dataset):
@@ -420,50 +467,3 @@ class StationaryDataset(Dataset):
         return sample.to(dtype=torch.float32)
 
 
-@register
-class MNIST1Dataset(torch.utils.data.Dataset):
-    """MNIST dataset filtered to only digit '1' - always downloads fresh"""
-    
-    def __init__(self, data_root=None, image_size=28, split="train", normalizer=None, interpolation=None, **kwargs):
-        from torchvision import datasets, transforms
-        import tempfile
-        
-        # Ignore data_root from config, use temp directory
-        temp_dir = tempfile.mkdtemp()
-        
-        # Load MNIST (downloads automatically)
-        is_train = (split == "train")
-        mnist = datasets.MNIST(
-            root=temp_dir,
-            train=is_train,
-            download=True
-        )
-        
-        # Filter to only digit '1'
-        indices = [i for i, (_, label) in enumerate(mnist) if label == 0]
-        self.data = [mnist[i][0] for i in indices]
-        
-        print(f"MNIST1Dataset initialized:")
-        print(f"  - Split: {split}")
-        print(f"  - Total '1' digits: {len(self.data)}")
-        print(f"  - Image size: {image_size}x{image_size}")
-        
-        # Setup transforms
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor()
-        ])
-        
-        self.normalizer = normalizer
-        self.C = 1  # Grayscale
-        self.H = image_size
-        self.W = image_size
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, idx):
-        img = self.data[idx]
-        img = self.transform(img)
-        img = self.normalizer.normalize(img)
-        return img

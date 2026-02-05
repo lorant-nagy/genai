@@ -47,18 +47,21 @@ class SDESolver:
             t_grid: Time grid of shape [n_steps + 1]
             X: Trajectories with shape [n_steps + 1, B, C, H, W]
         """
-        x0 = x0.to(self.device)
+        # Convert device to torch.device if it's a string
+        device = torch.device(self.device) if isinstance(self.device, str) else self.device
+        
+        x0 = x0.to(device)
         t0 = self.process.t0
         T  = self.process.T
         dt = (T - t0) / float(n_steps)
         sqrt_dt = dt ** 0.5
-        t_grid = torch.linspace(t0, T, n_steps + 1, device=self.device, dtype=x0.dtype)
+        t_grid = torch.linspace(t0, T, n_steps + 1, device=device, dtype=x0.dtype)
 
-        X = torch.empty(n_steps + 1, x0.shape[0], *x0.shape[1:], device=self.device, dtype=x0.dtype)
+        X = torch.empty(n_steps + 1, x0.shape[0], *x0.shape[1:], device=device, dtype=x0.dtype)
         X[0] = x0
 
         # RNG
-        rng = torch.Generator(device=self.device)
+        rng = torch.Generator(device=device)
 
         if seed is None:
             rng.seed()
@@ -70,8 +73,7 @@ class SDESolver:
         with torch.no_grad():
             for k in range(n_steps):
                 t = float(t_grid[k])
-                dW = torch.randn(x.shape, device=self.device, generator=rng, dtype=x.dtype) * sqrt_dt
+                dW = torch.randn(x.shape, device=device, generator=rng, dtype=x.dtype) * sqrt_dt
                 x  = self.integrator.step(self.process, x, t, dt, dW)
                 X[k + 1] = x
-
         return t_grid, X

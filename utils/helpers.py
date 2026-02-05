@@ -10,6 +10,143 @@ from diff.reverse import make_reverse
 from diff.sim_core import SDESolver
 import json
 import os
+from diff.samplers import StationarySampler
+
+
+def generate_samples_matplotlib(
+    model,
+    process,
+    integrator,
+    normalizer,
+    config,
+    dataset,
+    device,
+    n_samples=9,
+    n_steps=None,
+    cmap="gray"
+):
+    """
+    Generate samples from the model and return as wandb.Image using matplotlib.
+    
+    This uses the same visualization approach as backward_final_samples from eval_plotting,
+    displaying samples in a horizontal strip with matplotlib instead of torchvision grid.
+    
+    Args:
+        model: The score model
+        process: The forward SDE process
+        integrator: The integrator for reverse SDE
+        normalizer: The normalizer for denormalization
+        config: Config object
+        dataset: Dataset (for C, H, W dimensions)
+        device: Device to run on
+        n_samples: Number of samples to generate
+        n_steps: Number of reverse steps (fewer = faster)
+        cmap: Colormap for grayscale images (default: "gray")
+        
+    Returns:
+        wandb.Image object or None if failed
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    model.eval()
+    
+    try:
+        # Create reverse SDE
+        CHW = (dataset.C, dataset.H, dataset.W)
+        reverse_sde = make_reverse(
+            process, 
+            model, 
+            config.corruption.process_params.T, 
+            **config.reverse_params.to_dict(), 
+            CHW=CHW
+        )
+        
+        # Create solver
+        solver = SDESolver(reverse_sde, integrator)
+        
+        # Sample from stationary distribution
+        stationary_sampler = StationarySampler(config, device=device, equilibration_factor=5.0)
+        x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
+        
+        # Run reverse process
+        with torch.inference_mode():
+            t_grid, X = solver.simulate(x0, n_steps=n_steps, seed=None)
+        
+        # Get final samples (latest time = reconstructed data)
+        final_samples = X[-1]  # [n_samples, C, H, W]
+        
+        # Convert to list of numpy arrays (one per sample)
+        final_samples_np = final_samples.cpu().numpy()
+        samples_list = [final_samples_np[i] for i in range(n_samples)]
+        
+        # Create matplotlib figure - horizontal strip
+        fig, axs = plt.subplots(1, n_samples, figsize=(n_samples * 2.5, 2.5), squeeze=False)
+        axs = axs[0]  # 1D array of axes
+        
+        # Get visualization range from normalizer
+        vmin, vmax = normalizer.get_visualization_range()
+        
+        for i in range(n_samples):
+            ax = axs[i]
+            
+            # Get sample and denormalize
+            sample = samples_list[i]  # [C, H, W]
+            sample_torch = torch.from_numpy(sample)
+            sample_denorm = normalizer.denormalize(sample_torch).cpu().numpy()
+            
+            # Clip to visualization range
+            sample_denorm = np.clip(sample_denorm, vmin, vmax)
+            
+            # Handle channel dimension
+            if sample_denorm.shape[0] == 1:
+                # Grayscale: [1, H, W] -> [H, W]
+                img = sample_denorm[0]
+                ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
+            elif sample_denorm.shape[0] == 3:
+                # RGB: [3, H, W] -> [H, W, 3]
+                img = np.moveaxis(sample_denorm, 0, -1)
+                img = np.clip(img, 0.0, 1.0)
+                ax.imshow(img)
+            else:
+                raise ValueError(f"Unexpected channel count: {sample_denorm.shape[0]}")
+            
+            # Remove ticks and frame
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_frame_on(False)
+            
+            # Add sample index
+            ax.text(
+                0.02, 0.02, f"{i}",
+                transform=ax.transAxes, 
+                ha="left", va="bottom",
+                fontsize=9, 
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.35, lw=0, pad=1.0)
+            )
+        
+        # Tight layout with no padding
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0)
+        
+        # Convert figure to image for wandb
+        fig.canvas.draw()
+        img_array = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        img_array = img_array.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+        img_array = img_array[:, :, :3]  # Remove alpha channel
+        
+        plt.close(fig)
+        
+        return wandb.Image(img_array)
+        
+    except Exception as e:
+        print(f"[red]Sample generation (matplotlib) failed: {e}[/red]", flush=True)
+        import traceback
+        traceback.print_exc()
+        return None
+    
+    finally:
+        model.train()
 
 def log_wandb_metrics(metrics_evo: dict):
     temp_dict = {}
@@ -18,8 +155,10 @@ def log_wandb_metrics(metrics_evo: dict):
             temp_dict[key] = metrics_evo[key][-1]
     wandb.log(temp_dict)
 
-def create_header(metrics_evo: dict, width = None) -> str:
+def create_header(metrics_evo: dict, width = None, external = None) -> str:
     header = "  " + "".join(f"{k:<{width}}" for k in metrics_evo.keys())
+    if external:
+        header += "".join(f"{k:<{width}}" for k in external)
     return f"[bold]{header}[/bold]"
 
 def log_wandb_best(best_models: dict, config):
@@ -30,18 +169,30 @@ def log_wandb_best(best_models: dict, config):
         wandb.summary[f"best_{key}_epoch"] = int(info["epoch"])
 
 
-def build_line(metrics_evo: dict, width = None, METRIC_KEYS = METRIC_KEYS) -> str:
+def build_line(metrics_evo: dict, width = None, external_dict = None, METRIC_KEYS = METRIC_KEYS) -> str:
     cells = []
     for k in metrics_evo.keys():
         v_list = metrics_evo[k]
         v = v_list[-1] if v_list else "-"
 
         if isinstance(v, (float, np.floating)):
-            cells.append(f"{v:<{width}.14f}")
+            cells.append(f"{v:<{width}.7f}")
         elif isinstance(v, int):
             cells.append(f"{v:<{width}d}")
         else:
             cells.append(f"{str(v):<{width}}")
+    
+    # Add external values
+    if external_dict:
+        for k, v in external_dict.items():
+            if v is None:
+                cells.append(f"{'-':<{width}}")
+            elif isinstance(v, (float, np.floating)):
+                cells.append(f"{v:<{width}.7f}")
+            elif isinstance(v, int):
+                cells.append(f"{v:<{width}d}")
+            else:
+                cells.append(f"{str(v):<{width}}")
 
     return "  " + "".join(cells)
 

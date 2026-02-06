@@ -66,7 +66,7 @@ def generate_samples_matplotlib(
         solver = SDESolver(reverse_sde, integrator)
         
         # Sample from stationary distribution
-        stationary_sampler = StationarySampler(config, device=device, equilibration_factor=5.0)
+        stationary_sampler = StationarySampler(config, device=device)
         x0 = stationary_sampler((n_samples, dataset.C, dataset.H, dataset.W))
         
         # Run reverse process

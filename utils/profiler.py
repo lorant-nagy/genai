@@ -3,10 +3,10 @@
 Docker Profile Plotter - Analyze training runs and upload plots to WandB
 
 USAGE:
-    python docker_plot_profiles.py <runs_folder> <project_name>
+    python profiler.py <runs_folder> <project_name>
 
 EXAMPLE:
-    python docker_plot_profiles.py run_logs/runs/profiling profiling
+    python profiler.py run_logs/profiling/runs profiling
 """
 
 import subprocess
@@ -16,8 +16,8 @@ from pathlib import Path
 
 def main():
     if len(sys.argv) != 3:
-        print("Usage: python docker_plot_profiles.py <runs_folder> <project_name>")
-        print("Example: python docker_plot_profiles.py run_logs/runs/profiling profiling")
+        print("Usage: python profiler.py <runs_folder> <project_name>")
+        print("Example: python profiler.py run_logs/profiling/runs profiling")
         sys.exit(1)
     
     runs_folder = sys.argv[1]

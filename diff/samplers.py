@@ -13,20 +13,20 @@ class StationarySampler:
     Sample from stationary distribution by running forward SDE from N(0,1).
     """
     
-    def __init__(self, config, device: str = "cpu", equilibration_factor: float = 5.0):
+    def __init__(self, config, device: str = "cpu", stationary_time: float = 30.0):
         """
         Args:
             config: Configuration object
             device: Device to use for sampling
-            equilibration_factor: Multiply T and n_steps by this factor
+            stationary_time: Multiply T and n_steps by this factor
         """
         
         self.device = device
-        self.equilibration_factor = equilibration_factor
+        self.stationary_time = stationary_time
         
         process_name = config.corruption.process_cls
         process_parameters = copy.deepcopy(config.corruption.process_params)
-        process_parameters.T = process_parameters.T * equilibration_factor
+        process_parameters.T = self.stationary_time
         
         process_parameters.score_table_params = None  # No score table needed for forward process
 
@@ -38,8 +38,7 @@ class StationarySampler:
 
         self.solver = SDESolver(proc, integrator)
 
-        n_steps_base = config.corruption.corruptor_params.n_steps
-        self.n_steps = int(n_steps_base * equilibration_factor)
+        self.n_steps = int(config.env.adaptive_base * self.stationary_time)
     
     def __call__(self, shape: tuple) -> torch.Tensor:
         """

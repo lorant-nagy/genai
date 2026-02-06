@@ -91,7 +91,8 @@ else:
 
 metrics_freq = config.eval.metrics_freq
 results_dir = config.env.results_dir
-run_dir = os.path.join(results_dir, "runs", config.env.results_subdir, petname_str + "_" + time_str)
+project_dir = os.path.join(results_dir, config.wandb.project)
+run_dir = os.path.join(results_dir, config.env.results_subdir, "runs", petname_str + "_" + time_str)
 table_dir = os.path.join(results_dir, "score_tables")
 os.makedirs(run_dir, exist_ok=True)
 os.makedirs(table_dir, exist_ok=True)
@@ -147,7 +148,7 @@ corruptor_parameters.process = proc
 corruptor = Corruptor(**corruptor_parameters.to_dict())
 
 loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
-stationary_sampler = StationarySampler(config, device=DEVICE, equilibration_factor=5.0)
+stationary_sampler = StationarySampler(config, device=DEVICE)
 
 best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
 metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + METRIC_KEYS}

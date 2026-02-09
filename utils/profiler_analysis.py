@@ -46,8 +46,9 @@ def load_run_data(runs_dir):
                 continue
             finite = [v for v in values if isinstance(v, (int, float)) and np.isfinite(v)]
             if finite:
-                # Take median of last 5 epochs (more stable than min)
-                best_metrics[key] = np.median(finite[-5:]) if len(finite) >= 5 else min(finite)
+                K = 5
+                tail = finite[-K:]                 
+                best_metrics[key] = float(np.median(tail))
         
         all_data.append({
             'power': power, 

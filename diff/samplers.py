@@ -20,7 +20,6 @@ class StationarySampler:
             device: Device to use for sampling
             stationary_time: Multiply T and n_steps by this factor
         """
-        
         self.device = device
         self.stationary_time = stationary_time
         
@@ -40,21 +39,31 @@ class StationarySampler:
 
         self.n_steps = int(config.env.adaptive_base * self.stationary_time)
     
-    def __call__(self, shape: tuple) -> torch.Tensor:
+    def __call__(self, shape: tuple, seed: Optional[int] = None) -> torch.Tensor:
         """
         Sample from stationary distribution.
-        
-        Uses random seed each time to ensure diverse samples.
+
+        - If seed is None: uses a fresh random seed each call (diverse samples).
+        - If seed is provided: deterministic samples for that seed (useful for eval).
         """
-        # Generate random seed for this call to ensure diversity
-        import random
-        seed = random.randint(0, 2**32 - 1)
-        
-        # Start from N(0, 1)
-        x0 = torch.randn(shape, device=self.device)
+        # Choose seed
+        if seed is None:
+            seed = random.randint(0, 2**32 - 1)
+        seed = int(seed)
+
+        # Start from N(0, 1) deterministically w.r.t. seed
+        # (Using a local Generator avoids touching global RNG state.)
+        dev = torch.device(self.device)
+        g = torch.Generator(device=dev)
+        g.manual_seed(seed)
+
+        x0 = torch.randn(shape, device=dev, generator=g)
+
         with torch.no_grad():
             t_grid, X = self.solver.simulate(x0, n_steps=self.n_steps, seed=seed)
+
         return X[-1]
+
 
 
 def standard_normal_BCHW(batch_size: int, channels: int, height: int, width: int, device: str = "cpu") -> torch.Tensor:

@@ -1,4 +1,4 @@
-#eval.py
+# eval.py
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -73,7 +73,6 @@ def _inception_embeddings(x01: torch.Tensor) -> np.ndarray:
 
 
 def _fid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> float:
-    
     """Standard FID on embeddings using Gaussian approximation."""
     mu_r = feats_r.mean(axis=0)
     mu_g = feats_g.mean(axis=0)
@@ -120,10 +119,11 @@ def _poly_mmd2_unbiased(X: np.ndarray, Y: np.ndarray, degree=3, coef0=1.0) -> fl
     return float(term_xx + term_yy - term_xy)
 
 
-def _kid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> (float, float):
+def _kid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray, seed: np.random.SeedSequence | int | None = None) -> (float, float):
     """
     KID = mean and std over multiple random subsets.
-    Hardcoded subset size and count.
+
+    If seed is provided, the subset sampling is deterministic.
     """
     n = feats_r.shape[0]
     if feats_g.shape[0] != n:
@@ -133,8 +133,8 @@ def _kid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> (float, fl
     if n < m:
         raise ValueError(f"Need at least {_KID_SUBSET_SIZE} samples for KID subsets, got {n}.")
 
-    # rng = np.random.default_rng(0)
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
+
     vals = []
     for _ in range(_KID_NUM_SUBSETS):
         idx_r = rng.choice(n, size=m, replace=False)
@@ -143,56 +143,6 @@ def _kid_from_embeddings(feats_r: np.ndarray, feats_g: np.ndarray) -> (float, fl
 
     vals = np.array(vals, dtype=np.float64)
     return float(vals.mean()), float(vals.std(ddof=1))
-
-
-#v2
-# def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):
-#     X = np.asarray(X, dtype=np.float64)
-#     Y = np.asarray(Y, dtype=np.float64)
-
-#     if X.shape[0] != Y.shape[0]:
-#         raise ValueError("Need same number of samples (minimal helper assumption).")
-#     if not (np.isfinite(X).all() and np.isfinite(Y).all()):
-#         raise ValueError("Non-finite values in OT inputs (NaN/Inf).")
-
-#     # W1 (earth mover with euclidean cost)
-#     W1 = float(ot.solve_sample(X, Y, metric="euclidean").value)
-
-#     # W2 (sqrt of squared-W2 with sqeuclidean cost)
-#     W2_sq = float(ot.solve_sample(X, Y, metric="sqeuclidean").value)
-#     W2 = float(np.sqrt(max(W2_sq, 0.0)))
-
-#     return W1, W2
-
-
-# v3 - sinkhorn
-# def _w1_w2_sinkhorn(X: np.ndarray, Y: np.ndarray, reg: float = 0.1) -> (float, float):
-#        a = np.ones(X.shape[0]) / X.shape[0]
-#        b = np.ones(Y.shape[0]) / Y.shape[0]
-       
-#        M1 = ot.dist(X, Y, metric="euclidean")
-#        W1 = ot.sinkhorn2(a, b, M1, reg=reg)
-       
-#        M2 = ot.dist(X, Y, metric="sqeuclidean")
-#        W2_sq = ot.sinkhorn2(a, b, M2, reg=reg)
-#        return float(W1), float(np.sqrt(max(W2_sq, 0.0)))
-
-# v4 regularised
-
-# def _w1_w2_pot(X: np.ndarray, Y: np.ndarray, reg: float = 0.05) -> (float, float):
-#     n = X.shape[0]
-#     a = np.ones(n) / n
-#     b = np.ones(n) / n
-    
-#     # Use entropic regularization for stability
-#     M1 = ot.dist(X, Y, metric="euclidean")
-#     W1 = ot.sinkhorn2(a, b, M1, reg=reg)
-    
-#     M2 = ot.dist(X, Y, metric="sqeuclidean")
-#     W2_sq = ot.sinkhorn2(a, b, M2, reg=reg)
-#     W2 = np.sqrt(max(W2_sq, 0.0))
-    
-#     return float(W1), float(W2)
 
 
 def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):
@@ -218,7 +168,14 @@ def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):
     return float(W1), float(W2)
 
 
-def compute_metrics(real_true, gen_true):
+def compute_metrics(real_true, gen_true, kid_seed: int | None = None):
+    """
+    Compute metrics between real_true and gen_true.
+
+    kid_seed:
+      - None  -> KID subset sampling is random (current behavior).
+      - int   -> deterministic KID subset sampling for stable eval/profiling.
+    """
     keys = set(METRIC_KEYS)
     results = {}
 
@@ -234,7 +191,7 @@ def compute_metrics(real_true, gen_true):
         results["fid"] = _fid_from_embeddings(feats_r, feats_g)
 
     if ("kid_mean" in keys) or ("kid_std" in keys):
-        km, ks = _kid_from_embeddings(feats_r, feats_g)
+        km, ks = _kid_from_embeddings(feats_r, feats_g, seed=kid_seed)
         if "kid_mean" in keys: results["kid_mean"] = km
         if "kid_std"  in keys: results["kid_std"]  = ks
 

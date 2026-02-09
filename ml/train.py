@@ -117,6 +117,12 @@ dataset_parameters.normalizer = normalizer
 dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
 dataloader = DataLoader(dataset, **config.dataloader.to_dict())
 
+eval_dl_kwargs = dict(config.dataloader.to_dict())
+eval_dl_kwargs["shuffle"] = False      # MUST: same real subset across runs
+eval_dl_kwargs["drop_last"] = False
+eval_dl_kwargs["num_workers"] = 0      # strongly recommended for strict determinism
+eval_dataloader = DataLoader(dataset, **eval_dl_kwargs)
+
 model_name = config.model.cls
 model_parameters = config.model.model_params
 model_parameters.in_channels = dataset.C
@@ -149,6 +155,13 @@ corruptor = Corruptor(**corruptor_parameters.to_dict())
 loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
 stationary_sampler = StationarySampler(config, device=DEVICE)
 
+EVAL_SEED = int(getattr(config.eval, "seed", 0))  # if not in config, defaults to 0
+
+x0_eval = stationary_sampler(
+    (config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W),
+    seed=EVAL_SEED
+)
+
 best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
 metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + METRIC_KEYS}
 
@@ -161,7 +174,7 @@ print(f"\n[bold cyan]TRAINING:[/bold cyan]")
 average_loss_per_sample = 0.0
 loss_evo = []
 
-real_norm = collect_n_images(dataloader, config.eval.n_metric_samples, device=DEVICE)
+real_norm = collect_n_images(eval_dataloader, config.eval.n_metric_samples, device=DEVICE)
 real_true = normalizer.denormalize(real_norm).clamp(0, 1)
 
 print_tab_w = 16
@@ -198,30 +211,29 @@ for epoch in range(config.train.n_epochs):
     reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
     backward_solver = SDESolver(reverse_sde, integrator)
 
-    x0 = stationary_sampler((config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W))
-    
-    t_grid, X = backward_solver.simulate(
-                x0,
-                n_steps=config.corruption.corruptor_params.n_steps
-            )
 
-    gen_norm = X[-1].detach()
-    
-    total_steps = len(X)
-    first_appearance = torch.full_like(gen_norm, total_steps, dtype=torch.float32)
-    
-    for step_idx, X_t in enumerate(X):
-        nan_or_inf_mask = torch.isnan(X_t) | torch.isinf(X_t)
-        newly_bad = nan_or_inf_mask & (first_appearance == total_steps)
-        first_appearance[newly_bad] = step_idx
-    
-    affected_pixels = first_appearance < total_steps
-    avg_first_appearance = first_appearance[affected_pixels].mean().item() if affected_pixels.any() else total_steps
-    
-    del X
-    gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+    with torch.no_grad():
+        t_grid, X = backward_solver.simulate(
+            x0_eval,
+            n_steps=config.corruption.corruptor_params.n_steps,
+            seed=EVAL_SEED
+        )
+        gen_norm = X[-1].detach()
 
-    metrics_results = compute_metrics(real_true, gen_true)
+        total_steps = len(X)
+        first_appearance = torch.full_like(gen_norm, total_steps, dtype=torch.float32)
+
+        for step_idx, X_t in enumerate(X):
+            nan_or_inf_mask = torch.isnan(X_t) | torch.isinf(X_t)
+            newly_bad = nan_or_inf_mask & (first_appearance == total_steps)
+            first_appearance[newly_bad] = step_idx
+
+        affected_pixels = first_appearance < total_steps
+        avg_first_appearance = first_appearance[affected_pixels].mean().item() if affected_pixels.any() else total_steps
+
+        gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+
+    metrics_results = compute_metrics(real_true, gen_true, kid_seed=EVAL_SEED)
     fill_metrics_results(metrics_evo, metrics_results)
 
     sample_grid_matplotlib = generate_samples_matplotlib(

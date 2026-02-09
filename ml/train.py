@@ -47,7 +47,7 @@ import ml.normalizer
 
 from ml.eval import METRIC_KEYS
 
-BENCHMARK_METRICS = ["loss", "fid", "kid_mean","w1_emb"]
+BENCHMARK_METRICS = ["loss", "fid", "kid_mean"]
 
 # # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
@@ -90,10 +90,9 @@ else:
     print(f"[bold yellow]Using fixed number of steps:[/] [yellow]{config.corruption.corruptor_params.n_steps}[/]")
 
 metrics_freq = config.eval.metrics_freq
-results_dir = config.env.results_dir
-project_dir = os.path.join(results_dir, config.wandb.project)
-run_dir = os.path.join(results_dir, config.env.results_subdir, "runs", petname_str + "_" + time_str)
-table_dir = os.path.join(results_dir, "score_tables")
+project_dir = os.path.join(config.env.results_dir, config.wandb.project)
+run_dir = os.path.join(config.env.results_dir, config.wandb.project, "runs", petname_str + "_" + time_str)
+table_dir = os.path.join(config.env.results_dir, "score_tables")
 os.makedirs(run_dir, exist_ok=True)
 os.makedirs(table_dir, exist_ok=True)
 

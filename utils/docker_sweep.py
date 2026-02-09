@@ -31,9 +31,9 @@ def infer_log_path(config_dir):
     with open(configs[0], 'r') as f:
         config = yaml.safe_load(f)
     
-    results_subdir = config.get('env', {}).get('results_subdir', 'default')
+    wandb_project = config.get('wandb', {}).get('project', 'default_project')
     
-    log_path = Path('/data/lorantnagy/storage/genai/runs') / results_subdir / 'global_log.txt'
+    log_path = Path('run_logs') / wandb_project / 'global_logs.txt'
     return str(log_path)
 
 

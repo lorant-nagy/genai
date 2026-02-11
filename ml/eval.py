@@ -7,7 +7,7 @@ import ot  # POT
 from scipy import linalg
 from torchvision.models import inception_v3, Inception_V3_Weights
 
-METRIC_KEYS = ['fid', 'kid_mean', 'w1_emb']
+METRIC_KEYS = ['fid', 'kid_mean', 'kid_std' , 'w1_emb']
 # METRIC_KEYS = ['fid', 'kid_mean', 'kid_std', 'w1_pixel', 'w2_pixel', 'w1_emb', 'w2_emb']
 
 _INCEPTION_RES = 299

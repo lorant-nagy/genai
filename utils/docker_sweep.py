@@ -9,13 +9,90 @@ Usage:
 import argparse
 import subprocess
 import sys
+import os
 from pathlib import Path
 from datetime import datetime, timedelta
 import random
 import yaml
 import time
-from helpers import find_configs, infer_log_path, format_eta_info, format_timedelta
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
+def find_configs(config_dir):
+    """Find all .yml files in directory."""
+    config_dir = Path(config_dir)
+    configs = sorted([f for f in config_dir.glob("*.yml") if f.name != "manifest.yml"])
+    return configs
+
+
+def infer_log_path(config_dir):
+    """Infer log file path from the first config file."""
+    configs = find_configs(config_dir)
+    if not configs:
+        return None
+    
+    # Load first config to extract env settings
+    with open(configs[0], 'r') as f:
+        config = yaml.safe_load(f)
+    
+    wandb_project = config.get('wandb', {}).get('project', 'default_project')
+    
+    log_path = Path('run_logs') / wandb_project / 'global_logs.txt'
+    return str(log_path)
+
+
+def format_timedelta(td):
+    """Format a timedelta as HH:MM:SS."""
+    total_seconds = int(td.total_seconds())
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def format_eta_info(completed, total, avg_time_per_config, elapsed_time):
+    """Format ETA information for display."""
+    remaining = total - completed
+    if completed == 0:
+        return "ETA: Calculating..."
+    
+    estimated_remaining = avg_time_per_config * remaining
+    eta_time = datetime.now() + estimated_remaining
+    
+    return (f"Progress: {completed}/{total} | "
+            f"Avg time/config: {format_timedelta(avg_time_per_config)} | "
+            f"Elapsed: {format_timedelta(elapsed_time)} | "
+            f"ETA: {eta_time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"(~{format_timedelta(estimated_remaining)} remaining)")
+
+
+def run_config_in_docker(config_path, device, compose_file="compose.yml"):
+    """Run training in a fresh Docker container."""
+    # Docker compose run command
+    cmd = [
+        "docker", "compose",
+        "-f", compose_file,
+        "run",
+        "--rm",  # Remove container after completion
+        "train",
+        "python", "-m", "ml.train",
+        str(config_path)
+    ]
+    
+    if device:
+        cmd.extend(["--device", device])
+    
+    print(f"\n{'='*80}")
+    print(f"Running: {config_path.name}")
+    print(f"Command: {' '.join(cmd)}")
+    print(f"{'='*80}\n")
+    
+    config_start = time.time()
+    result = subprocess.run(cmd)
+    config_duration = time.time() - config_start
+    
+    return result.returncode, config_duration
 
 def main():
     parser = argparse.ArgumentParser(description='Run all configs in separate Docker containers')

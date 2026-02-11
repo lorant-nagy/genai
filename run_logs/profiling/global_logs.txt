@@ -57,3 +57,4 @@ SWEEP STARTED: 2026-02-09 13:04:37 | Device: 4 | Configs: 84
 [2026-02-11 12:29:35] SUCCESS: T_4__alpha_1__channel_mult_1_2_3__attention_resolutions_12__tags_mnist_large-model.yml (duration: 00:56:08)
 [2026-02-11 13:52:24] SUCCESS: T_10__alpha_1__channel_mult_1_2_3__attention_resolutions_12__tags_mnist_large-model.yml (duration: 01:22:49)
 [2026-02-11 15:48:56] SUCCESS: T_4p33__alpha_1__channel_mult_1_2_3__attention_resolutions_12__tags_mnist_large-model.yml (duration: 01:56:32)
+[2026-02-11 17:39:25] SUCCESS: T_7p66__alpha_1p5__channel_mult_1_2_3__attention_resolutions_12__tags_mnist_large-model.yml (duration: 01:50:29)

@@ -1,8 +1,0 @@
-
-================================================================================
-SWEEP STARTED: 2026-02-12 11:39:42 | Device: 2 | Configs: 2
-================================================================================
-[2026-02-12 13:14:38] SUCCESS: T_3p66__alpha_2__channel_mult_1_2_3__attention_resolutions_12__tags_mnist_large-model.yml (duration: 01:34:55)
-[2026-02-12 14:43:04] SUCCESS: T_9__alpha_1__channel_mult_1_2_3__attention_resolutions_12__tags_mnist_large-model.yml (duration: 01:28:26)
-SWEEP ENDED: 2026-02-12 14:43:04 | Duration: 3:03:21.951936 | Success: 2/2
-Average time per config: 01:31:40 | Min: 01:28:26 | Max: 01:34:55

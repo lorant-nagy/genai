@@ -1,0 +1,1 @@
+epic-dassie_T9.0_stepc145_scheEulerMaruyama_nx0300_n_x300_n_t1100_pow1.0_20260212_121444 : {'T': 9.0, 'stepc': 145, 'sche': 'EulerMaruyama', 'nx0': 300, 'n_x': 300, 'n_t': 1100, 'pow': 1.0}

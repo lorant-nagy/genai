@@ -37,7 +37,11 @@ class StationarySampler:
 
         self.solver = SDESolver(proc, integrator)
 
-        self.n_steps = int(config.env.adaptive_base * self.stationary_time)
+        if config.env.adaptive_step:
+            assert config.env.adaptive_base > 0
+            self.n_steps = int(config.env.adaptive_base * self.stationary_time)
+        else:
+            self.n_steps = config.corruption.corruptor_params.n_steps
     
     def __call__(self, shape: tuple, seed: Optional[int] = None) -> torch.Tensor:
         """

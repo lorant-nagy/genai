@@ -1,4 +1,3 @@
-# config_factory.py
 import yaml
 import argparse
 from pathlib import Path
@@ -91,9 +90,38 @@ def generate_config_name(sweep_params: List[Tuple[str, Any]]) -> str:
     
     return name
 
-def create_configs(factory_config: Dict) -> List[Tuple[str, Dict]]:
+def validate_hadamard_lengths(sweep_params: List[Tuple[str, List]]) -> int:
     """
-    Generate all config combinations from a factory config.
+    Validate that all sweep parameter lists have compatible lengths for hadamard mode.
+    Returns the target length (max non-singleton length).
+    Raises ValueError if incompatible.
+    """
+    lengths = [len(values) for _, values in sweep_params]
+    non_singleton_lengths = [l for l in lengths if l > 1]
+    
+    if not non_singleton_lengths:
+        # All are singletons, return 1
+        return 1
+    
+    # Check all non-singleton lengths are equal
+    target_length = non_singleton_lengths[0]
+    if not all(l == target_length for l in non_singleton_lengths):
+        # Build helpful error message
+        param_info = []
+        for path, values in sweep_params:
+            param_info.append(f"  {path}: length {len(values)}")
+        
+        error_msg = (
+            f"Hadamard mode requires all sweep arrays to have length 1 or the same length M.\n"
+            f"Found incompatible lengths:\n" + "\n".join(param_info)
+        )
+        raise ValueError(error_msg)
+    
+    return target_length
+
+def create_configs_descartes(factory_config: Dict) -> List[Tuple[str, Dict]]:
+    """
+    Generate all config combinations using Cartesian product (original behavior).
     Returns list of (config_name, config_dict) tuples.
     """
     # Find all parameters to sweep
@@ -123,6 +151,62 @@ def create_configs(factory_config: Dict) -> List[Tuple[str, Dict]]:
         configs.append((config_name, config))
     
     return configs
+
+def create_configs_hadamard(factory_config: Dict) -> List[Tuple[str, Dict]]:
+    """
+    Generate configs using pointwise/element-wise combination (hadamard mode).
+    Returns list of (config_name, config_dict) tuples.
+    """
+    # Find all parameters to sweep
+    sweep_params = find_sweep_params(factory_config)
+    
+    if not sweep_params:
+        # No sweep parameters, return single config
+        return [("config_0", factory_config)]
+    
+    # Validate lengths and get target length
+    target_length = validate_hadamard_lengths(sweep_params)
+    
+    # Generate configs by pointwise combination
+    configs = []
+    param_names = [path for path, _ in sweep_params]
+    param_values = [values for _, values in sweep_params]
+    
+    for i in range(target_length):
+        # Deep copy the base config
+        config = deepcopy(factory_config)
+        
+        # Set all swept parameters
+        sweep_settings = []
+        for path, values in zip(param_names, param_values):
+            # Use broadcasting: if length is 1, repeat that value; otherwise take i-th element
+            value = values[0] if len(values) == 1 else values[i]
+            set_nested_value(config, path, value)
+            sweep_settings.append((path, value))
+        
+        # Generate name
+        config_name = generate_config_name(sweep_settings)
+        configs.append((config_name, config))
+    
+    return configs
+
+def create_configs(factory_config: Dict, mode: str = 'descartes') -> List[Tuple[str, Dict]]:
+    """
+    Generate all config combinations from a factory config.
+    
+    Args:
+        factory_config: The factory config dictionary
+        mode: 'descartes' for Cartesian product or 'hadamard' for pointwise combination
+    
+    Returns:
+        List of (config_name, config_dict) tuples
+    """
+    if mode == 'descartes':
+        return create_configs_descartes(factory_config)
+    elif mode == 'hadamard':
+        return create_configs_hadamard(factory_config)
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Must be 'descartes' or 'hadamard'")
 
 def save_configs(configs: List[Tuple[str, Dict]], output_dir: Path) -> None:
     """Save all generated configs to the output directory."""
@@ -161,6 +245,13 @@ def main():
         type=str,
         help='Output directory for generated configs'
     )
+    parser.add_argument(
+        '--mode',
+        type=str,
+        choices=['descartes', 'hadamard'],
+        default='descartes',
+        help='Sweep mode: descartes (Cartesian product, default) or hadamard (pointwise/element-wise)'
+    )
     
     args = parser.parse_args()
     
@@ -174,7 +265,8 @@ def main():
     
     # Generate configs
     print(f"Loading factory config from: {factory_path}")
-    configs = create_configs(factory_config)
+    print(f"Mode: {args.mode}")
+    configs = create_configs(factory_config, mode=args.mode)
     
     # Save configs
     output_dir = Path(args.output_dir)

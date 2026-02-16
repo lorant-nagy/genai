@@ -92,8 +92,8 @@ def plot_metric(metric_key, data_by_power, project_name):
                 color=colors[i % len(colors)])
     
     ax.set_xlabel('T (Terminal Time)', fontsize=12)
-    ax.set_ylabel(f'Best {metric_key.upper()}', fontsize=12)
-    ax.set_title(f'Best {metric_key.upper()} vs T', fontsize=14, fontweight='bold')
+    ax.set_ylabel(f'{metric_key.upper()}', fontsize=12)
+    ax.set_title(f'{metric_key.upper()} vs T', fontsize=14, fontweight='bold')
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()

@@ -5,10 +5,12 @@ Docker Profile Plotter - Analyze training runs and upload plots to WandB
 USAGE:
     python profiler.py <runs_folder> <project_name>
     python profiler.py <runs_folder> <project_name> --anal_through_epochs
+    python profiler.py <runs_folder> <project_name> --partial
 
 EXAMPLE:
     python profiler.py run_logs/profiling/runs profiling
     python profiler.py run_logs/profiling/runs profiling --anal_through_epochs
+    python profiler.py run_logs/profiling/runs profiling --partial
 """
 
 import subprocess
@@ -18,18 +20,24 @@ from pathlib import Path
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python profiler.py <runs_folder> <project_name> [--anal_through_epochs]")
+        print("Usage: python profiler.py <runs_folder> <project_name> [--anal_through_epochs | --partial]")
         print("Example: python profiler.py run_logs/profiling/runs profiling")
         print("Example: python profiler.py run_logs/profiling/runs profiling --anal_through_epochs")
+        print("Example: python profiler.py run_logs/profiling/runs profiling --partial")
         sys.exit(1)
     
     runs_folder = sys.argv[1]
     project_name = sys.argv[2]
     
-    # Check for epoch analysis flag
-    if len(sys.argv) > 3 and sys.argv[3] == '--anal_through_epochs':
+    # Check for analysis mode flag
+    flags = set(sys.argv[3:])
+    
+    if '--anal_through_epochs' in flags:
         analysis_module = "utils.epoch_analysis"
         print(f"Running epoch-wise analysis: {runs_folder} -> WandB project '{project_name}'")
+    elif '--partial' in flags:
+        analysis_module = "utils.profiler_analysis_partial"
+        print(f"Running partial-run analysis: {runs_folder} -> WandB project '{project_name}'")
     else:
         analysis_module = "utils.profiler_analysis"
         print(f"Running analysis: {runs_folder} -> WandB project '{project_name}'")

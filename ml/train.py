@@ -25,12 +25,14 @@ from utils.helpers import (
     log_wandb_best,
     fill_metrics_results,
     dump_dict_to_json,
-    generate_samples_matplotlib
+    generate_samples_matplotlib,
+    load_cfg
 )
-from utils.config import load_cfg
+
 from utils.registry import REGISTRY
 
 from ml.eval import compute_metrics
+from ml.eval import METRIC_KEYS
 
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver
@@ -45,9 +47,9 @@ import ml.model
 import ml.dataset
 import ml.normalizer
 
-from ml.eval import METRIC_KEYS
 
-BENCHMARK_METRICS = ["loss", "fid", "kid_mean"]
+BENCHMARK_METRICS = ["loss", "w1_slice"]
+# BENCHMARK_METRICS = ["loss", "fid", "w1_slice"]
 
 # # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
@@ -206,6 +208,10 @@ for epoch in range(config.train.n_epochs):
     metrics_evo['epochs'].append(epoch+1)
     metrics_evo['loss'].append(loss_evo[-1])
     
+    # WARNING :::: SAVING MODEL STATES EVERY EPOCH
+    os.makedirs(os.path.join(run_dir, "states"), exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(run_dir, "states", f"epoch_{epoch+1:04d}.pth"))
+
     model.eval()
     CHW = (dataset.C, dataset.H, dataset.W)
     reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
@@ -269,6 +275,7 @@ for epoch in range(config.train.n_epochs):
         "nan%": nan_or_inf_per_image,
         "nan_step": avg_first_appearance
     }
+    wandb.log(external_dict)
 
     line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
     print(line)

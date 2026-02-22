@@ -13,6 +13,54 @@ import os
 from diff.samplers import StationarySampler
 import yaml
 
+class Cfg:
+    def __init__(self, data):
+        for k, v in (data or {}).items():
+            if isinstance(v, dict):
+                v = Cfg(v)
+            elif isinstance(v, list):
+                v = [Cfg(i) if isinstance(i, dict) else i for i in v]
+            setattr(self, k, v)
+
+    def to_dict(self):
+        result = {}
+        for k, v in self.__dict__.items():
+            if isinstance(v, Cfg):
+                v = v.to_dict()
+            elif isinstance(v, list):
+                v = [i.to_dict() if isinstance(i, Cfg) else i for i in v]
+            result[k] = v
+        return result
+
+def load_cfg(path: str) -> Cfg:
+    with open(path, "r") as f:
+        return Cfg(yaml.safe_load(f))
+
+def generate_8x8_grid(model, proc, integrator, normalizer, config, C, H, W, device, seed=None):
+    """
+    Generate 64 samples and return as a numpy image (H_grid, W_grid, C) or (H_grid, W_grid) for grayscale.
+    Model must already have the desired weights loaded and be in eval mode.
+    """
+    from diff.reverse import make_reverse
+    from diff.sim_core import SDESolver
+    from torchvision.utils import make_grid
+
+    CHW = (C, H, W)
+    reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+    solver = SDESolver(reverse_sde, integrator)
+
+    stationary_sampler = StationarySampler(config, device=device)
+    x0 = stationary_sampler((64, C, H, W), seed=seed)
+
+    with torch.no_grad():
+        _, X = solver.simulate(x0, n_steps=config.corruption.corruptor_params.n_steps, seed=seed)
+        gen_true = normalizer.denormalize(X[-1].detach()).clamp(0, 1)
+
+    grid = make_grid(gen_true, nrow=8)
+    img = grid.permute(1, 2, 0).cpu().numpy()
+    if img.shape[2] == 1:
+        img = img[:, :, 0]
+    return img
 
 def generate_samples_matplotlib(
     model,
@@ -265,51 +313,32 @@ def maybe_update_best(key, value, epoch, best_models_dict, model):
         new_best = True
     return new_best
 
-def wandb_log_best_and_plot(
-    model, proc, config, integrator, stationary_sampler, normalizer, best_models, C, H, W, epoch
-):
+def wandb_log_best_and_plot(model, proc, config, integrator, stationary_sampler, normalizer, best_models, C, H, W, epoch):
     import matplotlib.pyplot as plt
-    from torchvision.utils import make_grid
-    from diff.reverse import make_reverse
-    from diff.sim_core import SDESolver
-
-    N = 64  # hardcoded count (MINIMAL)
-    CHW = (C, H, W)
 
     was_training = model.training
     model.eval()
     orig_sd = copy.deepcopy(model.state_dict())
-
-    reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
-    backward_solver = SDESolver(reverse_sde, integrator)
 
     keys = list(best_models.keys())
     fig, axes = plt.subplots(len(keys), 1, figsize=(8, 3 * len(keys)))
     if len(keys) == 1:
         axes = [axes]
 
-    with torch.no_grad():
-        for ax, k in zip(axes, keys):
-            info = best_models[k]
-            model.load_state_dict(info["state_dict"])
+    device = str(next(model.parameters()).device)
 
-            x0 = stationary_sampler((N, C, H, W))
-            _, X = backward_solver.simulate(x0, n_steps=config.corruption.corruptor_params.n_steps)
+    for ax, k in zip(axes, keys):
+        info = best_models[k]
+        model.load_state_dict(info["state_dict"])
 
-            gen_norm = X[-1].detach()
-            del X
-            gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+        img = generate_8x8_grid(model, proc, integrator, normalizer, config, C, H, W, device)
 
-            grid = make_grid(gen_true, nrow=8)  # (C,H,W)
-            img = grid.permute(1, 2, 0).cpu().numpy()
-            if img.shape[2] == 1:
-                img = img[:, :, 0]
-                ax.imshow(img, cmap="gray")
-            else:
-                ax.imshow(img)
-
-            ax.set_title(f"{k} @ epoch {info['epoch']}")
-            ax.axis("off")
+        if img.ndim == 2:
+            ax.imshow(img, cmap="gray")
+        else:
+            ax.imshow(img)
+        ax.set_title(f"{k} @ epoch {info['epoch']}")
+        ax.axis("off")
 
     model.load_state_dict(orig_sd)
     if was_training:

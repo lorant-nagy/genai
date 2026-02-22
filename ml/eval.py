@@ -7,7 +7,8 @@ import ot  # POT
 from scipy import linalg
 from torchvision.models import inception_v3, Inception_V3_Weights
 
-METRIC_KEYS = ['fid', 'kid_mean', 'kid_std' , 'w1_emb']
+# METRIC_KEYS = ['fid', 'kid_mean', 'kid_std' , 'w1_emb', 'w1_slice']
+METRIC_KEYS = ['w1_slice']
 # METRIC_KEYS = ['fid', 'kid_mean', 'kid_std', 'w1_pixel', 'w2_pixel', 'w1_emb', 'w2_emb']
 
 _INCEPTION_RES = 299
@@ -167,6 +168,37 @@ def _w1_w2_pot(X: np.ndarray, Y: np.ndarray) -> (float, float):
 
     return float(W1), float(W2)
 
+_W1_SLICE_N = 3
+
+def _w1_sliced_pixel(real: torch.Tensor, gen: torch.Tensor, n_slices: int = _W1_SLICE_N) -> float:
+    """
+    W1 on concatenated horizontal + vertical pixel slices.
+    
+    real, gen: (N, C, H, W) tensors in [0,1].
+    Returns scalar W1.
+    """
+    N, C, H, W = real.shape
+    
+    # Slice positions: evenly spaced, excluding edges
+    v_cols = np.linspace(0, W - 1, n_slices + 2, dtype=int)[1:-1]  # vertical slices
+    h_rows = np.linspace(0, H - 1, n_slices + 2, dtype=int)[1:-1]  # horizontal slices
+    
+    def extract(x):
+        # x: (N, C, H, W)
+        v = x[:, :, :, v_cols]          # (N, C, H, n_slices)
+        h = x[:, :, h_rows, :]          # (N, C, n_slices, W)
+        v_flat = v.reshape(N, -1)       # (N, C*H*n_slices)
+        h_flat = h.reshape(N, -1)       # (N, C*n_slices*W)
+        return np.concatenate([v_flat, h_flat], axis=1)  # (N, C*(H+W)*n_slices)
+    
+    Xr = extract(real.detach().cpu().numpy()).astype(np.float64)
+    Xg = extract(gen.detach().cpu().numpy()).astype(np.float64)
+    
+    a = np.ones(N) / N
+    b = np.ones(N) / N
+    M = ot.dist(Xr, Xg, metric="euclidean")
+    return float(ot.emd2(a, b, M))
+
 
 def compute_metrics(real_true, gen_true, kid_seed: int | None = None):
     """
@@ -206,5 +238,8 @@ def compute_metrics(real_true, gen_true, kid_seed: int | None = None):
         w1e, w2e = _w1_w2_pot(feats_r, feats_g)
         if "w1_emb" in keys: results["w1_emb"] = w1e
         if "w2_emb" in keys: results["w2_emb"] = w2e
+
+    if "w1_slice" in keys:
+        results["w1_slice"] = _w1_sliced_pixel(real_true, gen_true)
 
     return results

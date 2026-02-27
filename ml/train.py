@@ -31,7 +31,7 @@ from utils.helpers import (
 
 from utils.registry import REGISTRY
 
-from ml.eval import compute_metrics
+from ml.eval import compute_metrics, cache_real
 from ml.eval import METRIC_KEYS
 
 from diff.corruptor import Corruptor
@@ -48,8 +48,7 @@ import ml.dataset
 import ml.normalizer
 
 
-BENCHMARK_METRICS = ["loss", "w1_slice"]
-# BENCHMARK_METRICS = ["loss", "fid", "w1_slice"]
+BENCHMARK_METRICS = ["loss", "w1_slice", "fid", "lenet_fid"]
 
 # # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
@@ -179,6 +178,7 @@ loss_evo = []
 
 real_norm = collect_n_images(eval_dataloader, config.eval.n_metric_samples, device=DEVICE)
 real_true = normalizer.denormalize(real_norm).clamp(0, 1)
+cache_real(real_true, device=torch.device(DEVICE))
 
 print_tab_w = 16
 header = create_header(metrics_evo, print_tab_w, external = ["nan%", "nan_step"])

@@ -1,12 +1,12 @@
 numpy
-scipy
+scipy>=1.7.0
 matplotlib
 pyyaml
 rich
 wandb
 petname
 joblib
-# Metrics dependencies
+# OT
 pot
-torch-fidelity
-scipy>=1.7.0
+# Metrics
+torchmetrics[image]

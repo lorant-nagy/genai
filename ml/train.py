@@ -97,6 +97,7 @@ run_dir = os.path.join(config.env.results_dir, config.wandb.project, "runs", pet
 table_dir = os.path.join(config.env.results_dir, "score_tables")
 os.makedirs(run_dir, exist_ok=True)
 os.makedirs(table_dir, exist_ok=True)
+os.makedirs(os.path.join(run_dir, "states"), exist_ok=True)
 
 # # # # # # # # B L O C K 2 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
@@ -184,12 +185,17 @@ header = create_header(metrics_evo, print_tab_w, external = ["nan%", "nan_step"]
 print(header)
 
 # # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-
+log_freq = 30
+backward_cntr = 0
+idx = 0
+save_by_freq = False
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 for epoch in range(config.train.n_epochs):
 
     loss_sum = 0.0
     
     for c, batch in enumerate(dataloader):
+        backward_cntr += 1
         batch = batch.to(DEVICE)
         corrupted = corruptor(batch)
         score = proc.score(corrupted['x'], batch, corrupted['t'])
@@ -201,7 +207,12 @@ for epoch in range(config.train.n_epochs):
         output.backward()
         optimizer.step()
         optimizer.zero_grad()
-    
+        
+        if save_by_freq:
+            if (c + 1) % log_freq == 0:
+                idx += 1
+                torch.save(model.state_dict(), os.path.join(run_dir, "states", f"epoch_{idx:04d}.pth"))
+        
     average_loss_per_sample = loss_sum / len(dataloader)
     loss_evo.append(average_loss_per_sample)
     
@@ -209,8 +220,8 @@ for epoch in range(config.train.n_epochs):
     metrics_evo['loss'].append(loss_evo[-1])
     
     # WARNING :::: SAVING MODEL STATES EVERY EPOCH
-    os.makedirs(os.path.join(run_dir, "states"), exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(run_dir, "states", f"epoch_{epoch+1:04d}.pth"))
+    # os.makedirs(os.path.join(run_dir, "states"), exist_ok=True)
+    # torch.save(model.state_dict(), os.path.join(run_dir, "states", f"epoch_{epoch+1:04d}.pth"))
 
     model.eval()
     CHW = (dataset.C, dataset.H, dataset.W)

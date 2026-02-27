@@ -1,12 +1,13 @@
 """
 ml/metrics.py
 -------------
-FID, KID (Inception and LeNet), and W1 (sliced pixel OT).
+FID, KID (Inception and LeNet), and W1 (exact full-image and sliced pixel OT).
 
 All metric classes accept [0,1] float tensors directly.
 Call cache_real(x_real) once, then compute(x_gen) each epoch.
 """
 
+import io
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,10 +19,18 @@ from torchmetrics.image.kid import KernelInceptionDistance
 
 
 # ---------------------------------------------------------------------------
-# Shared OT helper
+# Public OT helper  (full-image exact W1, reusable by external callers)
 # ---------------------------------------------------------------------------
 
+def w1(A: torch.Tensor, B: torch.Tensor) -> float:
+    """Exact Wasserstein-1 between two sets of flattened images."""
+    Xa = A.reshape(A.shape[0], -1).cpu().numpy().astype(np.float64)
+    Xb = B.reshape(B.shape[0], -1).cpu().numpy().astype(np.float64)
+    return _ot_w1(Xa, Xb)
+
+
 def _ot_w1(Xa: np.ndarray, Xb: np.ndarray) -> float:
+    """Shared OT solver used by both w1() and w1_slice()."""
     n = Xa.shape[0]
     w = np.ones(n) / n
     return float(ot.emd2(w, w, ot.dist(Xa, Xb, metric="euclidean"), numItermax=1_000_000))
@@ -53,9 +62,12 @@ def w1_slice(real: torch.Tensor, gen: torch.Tensor, n_slices: int = _W1_SLICE_N)
 # ---------------------------------------------------------------------------
 
 def _to_uint8(x: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """[0,1] float (N,C,H,W) -> uint8 RGB on device."""
+    """[0,1] float (N,C,H,W) -> uint8 RGB on device. C must be 1 or 3."""
+    C = x.shape[1]
+    if C not in (1, 3):
+        raise ValueError(f"Expected C in {{1, 3}}, got C={C}")
     x = x.clamp(0, 1)
-    if x.shape[1] == 1:
+    if C == 1:
         x = x.repeat(1, 3, 1, 1)
     return (x * 255).round().clamp(0, 255).to(torch.uint8).to(device)
 
@@ -83,8 +95,8 @@ class InceptionMetrics:
                  kid_subsets: int = 50,
                  kid_subset_size: int = 1000,
                  inception_bs: int = 128):
-        self.device          = device
-        self.inception_bs    = inception_bs
+        self.device       = device
+        self.inception_bs = inception_bs
 
         self._fid = FrechetInceptionDistance(
             feature=fid_feature, reset_real_features=False, normalize=False
@@ -142,7 +154,6 @@ def _build_lenet5() -> nn.Sequential:
 
 def _load_lenet5_embedder(device: torch.device) -> nn.Module:
     """Download weights into memory only — no disk write."""
-    import io
     print("Downloading LeNet-5 weights into memory...")
     with urllib.request.urlopen(_LENET_WEIGHTS_URL) as resp:
         buf = io.BytesIO(resp.read())

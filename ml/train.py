@@ -178,7 +178,7 @@ loss_evo = []
 
 real_norm = collect_n_images(eval_dataloader, config.eval.n_metric_samples, device=DEVICE)
 real_true = normalizer.denormalize(real_norm).clamp(0, 1)
-cache_real(real_true, device=torch.device(DEVICE))
+cache_real(real_true, device=torch.device(DEVICE), eval_cfg=config.eval)
 
 print_tab_w = 16
 header = create_header(metrics_evo, print_tab_w, external = ["nan%", "nan_step"])

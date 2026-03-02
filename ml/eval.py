@@ -1,9 +1,9 @@
 # eval.py
 import math
 import torch
-from ml.metrics import InceptionMetrics, LeNetMetrics, w1_slice
+from ml.metrics import InceptionMetrics, LeNetMetrics, w1, w1_slice
 
-METRIC_KEYS = ['w1_slice', 'fid', 'kid_mean', 'kid_std', 'lenet_fid', 'lenet_kid_mean', 'lenet_kid_std']
+METRIC_KEYS = ['w1', 'w1_slice', 'fid', 'kid_mean', 'kid_std', 'lenet_fid', 'lenet_kid_mean', 'lenet_kid_std']
 
 _inception: InceptionMetrics | None = None
 _lenet:     LeNetMetrics     | None = None
@@ -45,12 +45,12 @@ def compute_metrics(real_true: torch.Tensor, gen_true: torch.Tensor,
                     kid_seed: int | None = None) -> dict:
     results = {}
 
-    results['w1_slice'] = w1_slice(real_true, gen_true)
-
     fid, km, ks = _inception.compute(gen_true)
     results['fid']      = fid
     results['kid_mean'] = km
     results['kid_std']  = ks
+    results['w1']       = w1(real_true, gen_true)
+    results['w1_slice'] = w1_slice(real_true, gen_true)
 
     if _use_lenet:
         lfid, lkm, lks = _lenet.compute(gen_true, seed=kid_seed)

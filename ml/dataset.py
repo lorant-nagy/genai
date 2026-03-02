@@ -35,6 +35,7 @@ class MNIST1Dataset(torch.utils.data.Dataset):
         
         # Load MNIST (downloads automatically)
         is_train = (split == "train")
+        datasets.MNIST.mirrors = ["https://ossci-datasets.s3.amazonaws.com/mnist/"]
         mnist = datasets.MNIST(
             root=temp_dir,
             train=is_train,

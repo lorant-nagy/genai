@@ -48,7 +48,7 @@ import ml.dataset
 import ml.normalizer
 
 
-BENCHMARK_METRICS = ["loss", "w1_slice", "fid", "lenet_fid"]
+BENCHMARK_METRICS = ["loss", "w1", "w1_slice", "fid", "lenet_fid", "kid_mean", "lenet_kid_mean"]
 
 # # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 

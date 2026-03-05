@@ -113,7 +113,7 @@ class InceptionMetrics:
             _batched_update(self._kid, imgs, real=True, bs=self.inception_bs)
 
     def compute(self, x_gen: torch.Tensor) -> tuple[float, float, float]:
-        """Returns (fid, kid_mean, kid_std)."""
+        """Returns (fid, kid_mean, kid_std). KID values are sqrt(MMD²)."""
         imgs = _to_uint8(x_gen, self.device)
         with torch.no_grad():
             _batched_update(self._fid, imgs, real=False, bs=self.inception_bs)
@@ -122,7 +122,8 @@ class InceptionMetrics:
             km, ks = self._kid.compute()
         self._fid.reset()
         self._kid.reset()
-        return fid, float(km.cpu()), float(ks.cpu())
+        # torchmetrics KID returns MMD² — take sqrt for scale consistency with FID/W1
+        return fid, float(km.cpu().sqrt()), float(ks.cpu().sqrt())
 
 
 # ---------------------------------------------------------------------------
@@ -136,10 +137,10 @@ _LENET_WEIGHTS_URL = "https://raw.githubusercontent.com/icaros-usc/pyribs/master
 
 def _build_lenet5() -> nn.Sequential:
     return nn.Sequential(
-        nn.Conv2d(1, 6, (5, 5)),
+        nn.Conv2d(1, 6, (5, 5), stride=1, padding=0),
         nn.MaxPool2d(2),
         nn.ReLU(),
-        nn.Conv2d(6, 16, (5, 5)),
+        nn.Conv2d(6, 16, (5, 5), stride=1, padding=0),
         nn.MaxPool2d(2),
         nn.ReLU(),
         nn.Flatten(),
@@ -172,14 +173,42 @@ def _lenet_encode(embedder: nn.Module, x: torch.Tensor, bs: int) -> np.ndarray:
     return torch.cat(feats).numpy().astype(np.float64)
 
 
-def _fid_from_feats(fa: np.ndarray, fb: np.ndarray) -> float:
-    mu_a, mu_b = fa.mean(0), fb.mean(0)
-    cov_a, cov_b = np.cov(fa, rowvar=False), np.cov(fb, rowvar=False)
+def _fid_from_feats(fa: np.ndarray, fb: np.ndarray, eps: float = 1e-6) -> float:
+    """
+    Fréchet distance between two feature sets, returned as sqrt(FID²).
+
+    Guards:
+    - Returns nan if either set has < 2 samples or non-finite values.
+    - Symmetrizes covariances before sqrtm to counteract float asymmetry.
+    - Falls back to eps-regularized sqrtm if the first attempt is non-finite.
+    - Clamps squared result to 0 before sqrt to absorb float noise.
+    """
+    if fa.shape[0] < 2 or fb.shape[0] < 2:
+        return float("nan")
+    if not np.isfinite(fa).all() or not np.isfinite(fb).all():
+        return float("nan")
+
+    mu_a, mu_b = fa.mean(axis=0), fb.mean(axis=0)
+    cov_a = np.atleast_2d(np.cov(fa, rowvar=False))
+    cov_b = np.atleast_2d(np.cov(fb, rowvar=False))
+
+    # Symmetrize to counteract floating-point asymmetry from np.cov
+    cov_a = 0.5 * (cov_a + cov_a.T)
+    cov_b = 0.5 * (cov_b + cov_b.T)
+
+    diff = mu_a - mu_b
     covmean = linalg.sqrtm(cov_a @ cov_b)
+
+    # If sqrtm did not converge, retry with eps regularization
+    if not np.isfinite(covmean).all():
+        I = np.eye(cov_a.shape[0], dtype=np.float64)
+        covmean = linalg.sqrtm((cov_a + eps * I) @ (cov_b + eps * I))
+
     if np.iscomplexobj(covmean):
         covmean = covmean.real
-    diff = mu_a - mu_b
-    return float(diff @ diff + np.trace(cov_a + cov_b - 2.0 * covmean))
+
+    fid_sq = diff @ diff + np.trace(cov_a + cov_b - 2.0 * covmean)
+    return float(np.sqrt(max(fid_sq, 0.0)))
 
 
 def _poly_mmd2_unbiased(X: np.ndarray, Y: np.ndarray, degree=3, coef0=1.0) -> float:
@@ -193,23 +222,82 @@ def _poly_mmd2_unbiased(X: np.ndarray, Y: np.ndarray, degree=3, coef0=1.0) -> fl
     return float(Kxx.sum() / (m*(m-1)) + Kyy.sum() / (m*(m-1)) - 2.0 * Kxy.mean())
 
 
-def _kid_from_feats(fa, fb, n_subsets, subset_size, seed=None) -> tuple[float, float]:
+def _kid_from_feats_gpu(fa: np.ndarray, fb: np.ndarray,
+                        n_subsets: int, subset_size: int,
+                        seed: int | None = None,
+                        device: torch.device | None = None) -> tuple[float, float]:
+    """
+    Batched GPU implementation of polynomial MMD² across all subsets at once.
+
+    All n_subsets kernel matrices are computed in a single torch.bmm call,
+    avoiding the Python loop and keeping arithmetic on the GPU.
+    Returns sqrt(MMD²) mean and std — same scale as FID / W1.
+    """
     rng = np.random.default_rng(seed)
-    vals = np.array([
+    idx_a = np.stack([rng.choice(fa.shape[0], size=subset_size, replace=False)
+                      for _ in range(n_subsets)])
+    idx_b = np.stack([rng.choice(fb.shape[0], size=subset_size, replace=False)
+                      for _ in range(n_subsets)])
+
+    dev = device if (device is not None and device.type == "cuda") else torch.device("cpu")
+
+    Xa = torch.from_numpy(fa[idx_a]).to(dev, dtype=torch.float32)   # [n_subsets, m, d]
+    Xb = torch.from_numpy(fb[idx_b]).to(dev, dtype=torch.float32)
+
+    n_sub, m, d = Xa.shape
+    gamma = 1.0 / d
+
+    Kxx = (gamma * torch.bmm(Xa, Xa.transpose(1, 2)) + 1.0) ** 3
+    Kyy = (gamma * torch.bmm(Xb, Xb.transpose(1, 2)) + 1.0) ** 3
+    Kxy = (gamma * torch.bmm(Xa, Xb.transpose(1, 2)) + 1.0) ** 3
+
+    diag_mask = torch.eye(m, dtype=torch.bool, device=dev).unsqueeze(0)
+    Kxx.masked_fill_(diag_mask, 0.0)
+    Kyy.masked_fill_(diag_mask, 0.0)
+
+    off = m * (m - 1)
+    vals = (Kxx.view(n_sub, -1).sum(1) / off
+            + Kyy.view(n_sub, -1).sum(1) / off
+            - 2.0 * Kxy.view(n_sub, -1).mean(1))
+
+    vals_np = np.sqrt(np.maximum(vals.cpu().float().numpy(), 0.0))
+    return float(vals_np.mean()), float(vals_np.std(ddof=1))
+
+
+def _kid_from_feats(fa: np.ndarray, fb: np.ndarray,
+                    n_subsets: int, subset_size: int,
+                    seed: int | None = None,
+                    device: torch.device | None = None) -> tuple[float, float]:
+    """
+    Dispatches to GPU-batched implementation when CUDA is available, numpy loop otherwise.
+    Returns sqrt(MMD²) mean and std — same scale as FID / W1.
+    """
+    if fa.shape[0] < subset_size or fb.shape[0] < subset_size:
+        raise ValueError(f"Need at least {subset_size} samples for KID subsets.")
+
+    if device is not None and device.type == "cuda":
+        return _kid_from_feats_gpu(fa, fb, n_subsets, subset_size, seed=seed, device=device)
+
+    # CPU fallback
+    rng = np.random.default_rng(seed)
+    vals = np.sqrt(np.maximum(np.array([
         _poly_mmd2_unbiased(
             fa[rng.choice(fa.shape[0], size=subset_size, replace=False)],
             fb[rng.choice(fb.shape[0], size=subset_size, replace=False)],
         )
         for _ in range(n_subsets)
-    ])
+    ]), 0.0))
     return float(vals.mean()), float(vals.std(ddof=1))
 
 
 class LeNetMetrics:
     """
     FID and KID using frozen LeNet-5 (84-d penultimate features).
-    Only valid for 1-channel 28x28 inputs (MNIST-like).
+    Accepts any 1-channel input — resizes to 28×28 internally if needed.
     Weights are fetched into memory — nothing written to disk.
+
+    FID : sqrt(Fréchet distance)   — same scale as W1.
+    KID : sqrt(MMD²) mean and std  — same scale as W1.
     """
 
     def __init__(self, device: torch.device,
@@ -221,20 +309,27 @@ class LeNetMetrics:
         self.kid_subset_size = kid_subset_size
         self.bs              = bs
         self.embedder        = _load_lenet5_embedder(device)
-        self._feats_real     = None
-
+        self._feats_real: np.ndarray | None = None
 
     def _preprocess(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1] != 28 or x.shape[-2] != 28:
-            x = torch.nn.functional.interpolate(x, size=(28, 28), mode='bilinear', align_corners=False)
+            x = torch.nn.functional.interpolate(
+                x, size=(28, 28), mode="bilinear", align_corners=False
+            )
         return ((x.clamp(0, 1) - _LENET_MEAN) / _LENET_STD).to(self.device)
 
     def cache_real(self, x_real: torch.Tensor) -> None:
         self._feats_real = _lenet_encode(self.embedder, self._preprocess(x_real), self.bs)
 
     def compute(self, x_gen: torch.Tensor, seed=None) -> tuple[float, float, float]:
-        """Returns (fid, kid_mean, kid_std)."""
+        """Returns (fid, kid_mean, kid_std). Both are sqrt-scaled."""
         fb = _lenet_encode(self.embedder, self._preprocess(x_gen), self.bs)
         fid = _fid_from_feats(self._feats_real, fb)
-        km, ks = _kid_from_feats(self._feats_real, fb, self.kid_subsets, self.kid_subset_size, seed)
+        km, ks = _kid_from_feats(
+            self._feats_real, fb,
+            n_subsets=self.kid_subsets,
+            subset_size=self.kid_subset_size,
+            seed=seed,
+            device=self.device,
+        )
         return fid, km, ks

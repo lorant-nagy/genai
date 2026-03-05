@@ -232,29 +232,36 @@ def save_configs(configs: List[Tuple[str, Dict]], output_dir: Path) -> None:
     print(f"Manifest saved to: {output_dir / 'manifest.yml'}")
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Generate config files from a factory config with parameter sweeps'
-    )
-    parser.add_argument(
-        'factory_config',
-        type=str,
-        help='Path to factory config YAML file'
-    )
-    parser.add_argument(
-        'output_dir',
-        type=str,
-        help='Output directory for generated configs'
-    )
-    parser.add_argument(
-        '--mode',
-        type=str,
-        choices=['descartes', 'hadamard'],
-        default='descartes',
-        help='Sweep mode: descartes (Cartesian product, default) or hadamard (pointwise/element-wise)'
-    )
+    # parser = argparse.ArgumentParser(
+    #     description='Generate config files from a factory config with parameter sweeps'
+    # )
+    # parser.add_argument(
+    #     'factory_config',
+    #     type=str,
+    #     help='Path to factory config YAML file'
+    # )
+    # parser.add_argument(
+    #     'output_dir',
+    #     type=str,
+    #     help='Output directory for generated configs'
+    # )
+    # parser.add_argument(
+    #     '--mode',
+    #     type=str,
+    #     choices=['descartes', 'hadamard'],
+    #     default='descartes',
+    #     help='Sweep mode: descartes (Cartesian product, default) or hadamard (pointwise/element-wise)'
+    # )
     
-    args = parser.parse_args()
+    # args = parser.parse_args()
     
+    class Args:
+        factory_config = "/home/lorantnagy/repositories/genai/config/factories/factory_step_experiment.yml"
+        output_dir = "/home/lorantnagy/repositories/genai/config/batch_cfgs/step_experiment"
+        mode = "hadamard"
+
+    args = Args()
+
     # Load factory config
     factory_path = Path(args.factory_config)
     if not factory_path.exists():

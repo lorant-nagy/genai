@@ -329,6 +329,10 @@ def wandb_log_best_and_plot(model, proc, config, integrator, stationary_sampler,
 
     for ax, k in zip(axes, keys):
         info = best_models[k]
+        if info["state_dict"] is None:
+            ax.set_title(f"{k} — no best recorded")
+            ax.axis("off")
+            continue
         model.load_state_dict(info["state_dict"])
 
         img = generate_8x8_grid(model, proc, integrator, normalizer, config, C, H, W, device)

@@ -28,8 +28,6 @@ def cache_real(real_true: torch.Tensor, device: torch.device, eval_cfg) -> None:
     _use_lenet = (
         eval_cfg.use_lenet
         and real_true.shape[1] == 1
-        and real_true.shape[2] == 28
-        and real_true.shape[3] == 28
     )
     if _use_lenet:
         _lenet = LeNetMetrics(

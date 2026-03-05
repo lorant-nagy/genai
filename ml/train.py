@@ -185,10 +185,11 @@ header = create_header(metrics_evo, print_tab_w, external = ["nan%", "nan_step"]
 print(header)
 
 # # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-log_freq = 30
+log_freq_1_epoch = len(dataloader) // 2
+log_freq = log_freq_1_epoch
 backward_cntr = 0
 idx = 0
-save_by_freq = False
+save_by_freq = True
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 for epoch in range(config.train.n_epochs):
 

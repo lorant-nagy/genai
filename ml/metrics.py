@@ -223,7 +223,10 @@ class LeNetMetrics:
         self.embedder        = _load_lenet5_embedder(device)
         self._feats_real     = None
 
+
     def _preprocess(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] != 28 or x.shape[-2] != 28:
+            x = torch.nn.functional.interpolate(x, size=(28, 28), mode='bilinear', align_corners=False)
         return ((x.clamp(0, 1) - _LENET_MEAN) / _LENET_STD).to(self.device)
 
     def cache_real(self, x_real: torch.Tensor) -> None:

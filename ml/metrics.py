@@ -40,21 +40,38 @@ def _ot_w1(Xa: np.ndarray, Xb: np.ndarray) -> float:
 # W1 sliced pixel
 # ---------------------------------------------------------------------------
 
-_W1_SLICE_N = 3
+def w1_slice(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    n_projections: int = 256,
+    seed: int | None = None,
+    device: torch.device | None = None,
+) -> float:
+    """
+    Sliced Wasserstein-1 distance, fully on GPU (or CPU if unavailable).
 
-def w1_slice(real: torch.Tensor, gen: torch.Tensor, n_slices: int = _W1_SLICE_N) -> float:
-    N, C, H, W = real.shape
-    v_cols = np.linspace(0, W - 1, n_slices + 2, dtype=int)[1:-1]
-    h_rows = np.linspace(0, H - 1, n_slices + 2, dtype=int)[1:-1]
+    Projects both point clouds onto n_projections random unit directions,
+    sorts each 1D projection, and averages the L1 distances.
+    No OT solver — O(N log N) per projection via torch.sort.
 
-    def extract(x):
-        v = x[:, :, :, v_cols].reshape(N, -1)
-        h = x[:, :, h_rows, :].reshape(N, -1)
-        return np.concatenate([v, h], axis=1).astype(np.float64)
+    A, B : [N, C, H, W] float tensors in any value range.
+    """
+    dev = device if device is not None else (A.device if A.is_cuda else torch.device("cpu"))
 
-    Xr = extract(real.detach().cpu().numpy())
-    Xg = extract(gen.detach().cpu().numpy())
-    return _ot_w1(Xr, Xg)
+    Af = A.reshape(A.shape[0], -1).to(dev, dtype=torch.float32)
+    Bf = B.reshape(B.shape[0], -1).to(dev, dtype=torch.float32)
+    D  = Af.shape[1]
+
+    gen_rng = torch.Generator(device=dev)
+    if seed is not None:
+        gen_rng.manual_seed(seed)
+    dirs = torch.randn(D, n_projections, device=dev, generator=gen_rng)
+    dirs = dirs / dirs.norm(dim=0, keepdim=True)
+
+    pa = (Af @ dirs).sort(dim=0).values
+    pb = (Bf @ dirs).sort(dim=0).values
+
+    return float((pa - pb).abs().mean())
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +104,7 @@ class InceptionMetrics:
 
     reset_real_features=False makes torchmetrics preserve real features
     across reset() calls, so Inception runs on the real set only once.
+    Set use_fid=False or use_kid=False to skip either metric (returns nan).
     """
 
     def __init__(self, device: torch.device,
@@ -94,36 +112,48 @@ class InceptionMetrics:
                  kid_feature: int = 2048,
                  kid_subsets: int = 50,
                  kid_subset_size: int = 1000,
-                 inception_bs: int = 128):
+                 inception_bs: int = 128,
+                 use_fid: bool = True,
+                 use_kid: bool = True):
         self.device       = device
         self.inception_bs = inception_bs
+        self.use_fid      = use_fid
+        self.use_kid      = use_kid
 
         self._fid = FrechetInceptionDistance(
             feature=fid_feature, reset_real_features=False, normalize=False
-        ).to(device)
+        ).to(device) if use_fid else None
         self._kid = KernelInceptionDistance(
             feature=kid_feature, subsets=kid_subsets, subset_size=kid_subset_size,
             reset_real_features=False, normalize=False
-        ).to(device)
+        ).to(device) if use_kid else None
 
     def cache_real(self, x_real: torch.Tensor) -> None:
         imgs = _to_uint8(x_real, self.device)
         with torch.no_grad():
-            _batched_update(self._fid, imgs, real=True, bs=self.inception_bs)
-            _batched_update(self._kid, imgs, real=True, bs=self.inception_bs)
+            if self.use_fid:
+                _batched_update(self._fid, imgs, real=True, bs=self.inception_bs)
+            if self.use_kid:
+                _batched_update(self._kid, imgs, real=True, bs=self.inception_bs)
 
     def compute(self, x_gen: torch.Tensor) -> tuple[float, float, float]:
-        """Returns (fid, kid_mean, kid_std). KID values are sqrt(MMD²)."""
+        """Returns (fid, kid_mean, kid_std). Disabled metrics return nan."""
         imgs = _to_uint8(x_gen, self.device)
         with torch.no_grad():
-            _batched_update(self._fid, imgs, real=False, bs=self.inception_bs)
-            _batched_update(self._kid, imgs, real=False, bs=self.inception_bs)
-            fid = float(self._fid.compute().cpu())
-            km, ks = self._kid.compute()
-        self._fid.reset()
-        self._kid.reset()
-        # torchmetrics KID returns MMD² — take sqrt for scale consistency with FID/W1
-        return fid, float(km.cpu().sqrt()), float(ks.cpu().sqrt())
+            if self.use_fid:
+                _batched_update(self._fid, imgs, real=False, bs=self.inception_bs)
+                fid = float(self._fid.compute().cpu())
+                self._fid.reset()
+            else:
+                fid = float("nan")
+            if self.use_kid:
+                _batched_update(self._kid, imgs, real=False, bs=self.inception_bs)
+                km, ks = self._kid.compute()
+                self._kid.reset()
+                km, ks = float(km.cpu().sqrt()), float(ks.cpu().sqrt())
+            else:
+                km, ks = float("nan"), float("nan")
+        return fid, km, ks
 
 
 # ---------------------------------------------------------------------------

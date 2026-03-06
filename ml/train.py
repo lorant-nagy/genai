@@ -48,7 +48,7 @@ import ml.dataset
 import ml.normalizer
 
 
-BENCHMARK_METRICS = ["loss", "w1", "w1_slice", "fid", "lenet_fid", "kid_mean", "lenet_kid_mean"]
+BENCHMARK_METRICS = ["loss", "fid", "lenet_fid", "lenet_kid_mean"]
 
 # # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
@@ -189,7 +189,7 @@ log_freq_1_epoch = len(dataloader) // 2
 log_freq = log_freq_1_epoch
 backward_cntr = 0
 idx = 0
-save_by_freq = True
+save_by_freq = False
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 for epoch in range(config.train.n_epochs):
 

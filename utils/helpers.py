@@ -353,7 +353,8 @@ def wandb_log_best_and_plot(model, proc, config, integrator, stationary_sampler,
 
 def fill_metrics_results(metrics_evo, metrics_results):
     for key, value in metrics_results.items():
-        metrics_evo[key].append(value)
+        if key in metrics_evo:
+            metrics_evo[key].append(value)
     has_bad = any(not np.isfinite(v) for v in metrics_results.values())
     metrics_evo["nan"].append("NaN" if has_bad else "")
 

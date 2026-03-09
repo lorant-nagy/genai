@@ -31,7 +31,8 @@ from utils.helpers import (
 
 from utils.registry import REGISTRY
 
-from ml.eval import compute_metrics, cache_real
+import ml.metrics  # registers all metric classes into REGISTRY
+from ml.eval import compute_metrics, cache_real, active_scalar_keys
 from ml.eval import METRIC_KEYS
 
 from diff.corruptor import Corruptor
@@ -47,8 +48,6 @@ import ml.model
 import ml.dataset
 import ml.normalizer
 
-
-BENCHMARK_METRICS = ["loss", "fid", "lenet_fid", "lenet_kid_mean"]
 
 # # # # # # # # B L O C K 1  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
@@ -90,7 +89,6 @@ if adaptive_step:
 else:
     print(f"[bold yellow]Using fixed number of steps:[/] [yellow]{config.corruption.corruptor_params.n_steps}[/]")
 
-metrics_freq = config.eval.metrics_freq
 project_dir = os.path.join(config.env.results_dir, config.wandb.project)
 run_dir = os.path.join(config.env.results_dir, config.wandb.project, "runs", petname_str + "_" + time_str)
 table_dir = os.path.join(config.env.results_dir, "score_tables")
@@ -164,8 +162,7 @@ x0_eval = stationary_sampler(
     seed=EVAL_SEED
 )
 
-best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
-metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + METRIC_KEYS}
+BENCHMARK_METRICS = list(config.eval.benchmark_metrics)
 
 print("[bold green]---------------------------------------------------------------[/bold green]")
 print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/bold green]")
@@ -180,21 +177,20 @@ real_norm = collect_n_images(eval_dataloader, config.eval.n_metric_samples, devi
 real_true = normalizer.denormalize(real_norm).clamp(0, 1)
 cache_real(real_true, device=torch.device(DEVICE), eval_cfg=config.eval)
 
+best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
+metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + active_scalar_keys()}
+
 print_tab_w = 16
 header = create_header(metrics_evo, print_tab_w, external = ["nan%", "nan_step"])
 print(header)
 
 # # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-log_freq_1_epoch = len(dataloader) // 2
-log_freq = log_freq_1_epoch
 backward_cntr = 0
-idx = 0
-save_by_freq = False
+loss_sum_interval = 0.0
+log_backward_freq = config.eval.log_backward_freq
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 for epoch in range(config.train.n_epochs):
 
-    loss_sum = 0.0
-    
     for c, batch in enumerate(dataloader):
         backward_cntr += 1
         batch = batch.to(DEVICE)
@@ -202,95 +198,91 @@ for epoch in range(config.train.n_epochs):
         score = proc.score(corrupted['x'], batch, corrupted['t'])
         prediction = model(corrupted['x'], corrupted['t'])
         output = loss_fn(prediction, score)
-        
-        loss_sum += output.item()
-        
+
+        loss_sum_interval += output.item()
+
         output.backward()
         optimizer.step()
         optimizer.zero_grad()
-        
-        if save_by_freq:
-            if (c + 1) % log_freq == 0:
-                idx += 1
-                torch.save(model.state_dict(), os.path.join(run_dir, "states", f"epoch_{idx:04d}.pth"))
-        
-    average_loss_per_sample = loss_sum / len(dataloader)
-    loss_evo.append(average_loss_per_sample)
-    
-    metrics_evo['epochs'].append(epoch+1)
-    metrics_evo['loss'].append(loss_evo[-1])
-    
-    # WARNING :::: SAVING MODEL STATES EVERY EPOCH
-    # os.makedirs(os.path.join(run_dir, "states"), exist_ok=True)
-    # torch.save(model.state_dict(), os.path.join(run_dir, "states", f"epoch_{epoch+1:04d}.pth"))
 
-    model.eval()
-    CHW = (dataset.C, dataset.H, dataset.W)
-    reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
-    backward_solver = SDESolver(reverse_sde, integrator)
+        if backward_cntr % log_backward_freq != 0:
+            continue
 
+        # # # # # # # # E V A L  B L O C K # # # # # # # # # # # # # # #
 
-    with torch.no_grad():
-        t_grid, X = backward_solver.simulate(
-            x0_eval,
-            n_steps=config.corruption.corruptor_params.n_steps,
-            seed=EVAL_SEED
+        avg_loss = loss_sum_interval / log_backward_freq
+        loss_sum_interval = 0.0
+        loss_evo.append(avg_loss)
+
+        metrics_evo['epochs'].append(backward_cntr)
+        metrics_evo['loss'].append(avg_loss)
+
+        model.eval()
+        CHW = (dataset.C, dataset.H, dataset.W)
+        reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+        backward_solver = SDESolver(reverse_sde, integrator)
+
+        with torch.no_grad():
+            t_grid, X = backward_solver.simulate(
+                x0_eval,
+                n_steps=config.corruption.corruptor_params.n_steps,
+                seed=EVAL_SEED
+            )
+            gen_norm = X[-1].detach()
+
+            total_steps = len(X)
+            first_appearance = torch.full_like(gen_norm, total_steps, dtype=torch.float32)
+
+            for step_idx, X_t in enumerate(X):
+                nan_or_inf_mask = torch.isnan(X_t) | torch.isinf(X_t)
+                newly_bad = nan_or_inf_mask & (first_appearance == total_steps)
+                first_appearance[newly_bad] = step_idx
+
+            affected_pixels = first_appearance < total_steps
+            avg_first_appearance = first_appearance[affected_pixels].mean().item() if affected_pixels.any() else total_steps
+
+            gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+
+        metrics_results = compute_metrics(real_true, gen_true, kid_seed=EVAL_SEED)
+        fill_metrics_results(metrics_evo, metrics_results)
+
+        sample_grid_matplotlib = generate_samples_matplotlib(
+            model=model,
+            process=proc,
+            integrator=integrator,
+            normalizer=normalizer,
+            config=config,
+            dataset=dataset,
+            device=DEVICE,
+            n_samples=8,
+            n_steps=config.corruption.corruptor_params.n_steps
         )
-        gen_norm = X[-1].detach()
 
-        total_steps = len(X)
-        first_appearance = torch.full_like(gen_norm, total_steps, dtype=torch.float32)
+        model.train()
+        # # e n d  o f  e v a l  b l o c k # # # # # # #
 
-        for step_idx, X_t in enumerate(X):
-            nan_or_inf_mask = torch.isnan(X_t) | torch.isinf(X_t)
-            newly_bad = nan_or_inf_mask & (first_appearance == total_steps)
-            first_appearance[newly_bad] = step_idx
+        if sample_grid_matplotlib is not None:
+            wandb.log({"generated_samples": sample_grid_matplotlib, "backward_step": backward_cntr})
 
-        affected_pixels = first_appearance < total_steps
-        avg_first_appearance = first_appearance[affected_pixels].mean().item() if affected_pixels.any() else total_steps
+        for metric in BENCHMARK_METRICS:
+            if metric in metrics_evo and len(metrics_evo[metric]) > 0:
+                maybe_update_best(metric, metrics_evo[metric][-1], backward_cntr, best_models, model)
 
-        gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+        log_wandb_metrics(metrics_evo)
 
-    metrics_results = compute_metrics(real_true, gen_true, kid_seed=EVAL_SEED)
-    fill_metrics_results(metrics_evo, metrics_results)
+        # NaN/Inf diagnostics
+        n_images = gen_norm.shape[0]
+        nan_or_inf_mask = torch.isnan(gen_norm) | torch.isinf(gen_norm)
+        nan_or_inf_per_image = nan_or_inf_mask.view(n_images, -1).any(dim=1).float().mean().item() * 100
 
-    sample_grid_matplotlib = generate_samples_matplotlib(
-        model=model,
-        process=proc,
-        integrator=integrator,
-        normalizer=normalizer,
-        config=config,
-        dataset=dataset,
-        device=DEVICE,
-        n_samples=8,
-        n_steps=config.corruption.corruptor_params.n_steps
-    )
-    
-    model.train()
-    # #e n d  o f  e v a l  s u b - b l o c k # # # # # # #
+        external_dict = {
+            "nan%": nan_or_inf_per_image,
+            "nan_step": avg_first_appearance
+        }
+        wandb.log(external_dict)
 
-    if sample_grid_matplotlib is not None:
-        wandb.log({"generated_samples": sample_grid_matplotlib, "epoch": epoch + 1})
-
-    for metric in BENCHMARK_METRICS:
-        if metric in metrics_evo and len(metrics_evo[metric]) > 0:
-            maybe_update_best(metric, metrics_evo[metric][-1], epoch+1, best_models, model)
-
-    log_wandb_metrics(metrics_evo)
-
-    # NaN/Inf diagnostics
-    n_images = gen_norm.shape[0]
-    nan_or_inf_mask = torch.isnan(gen_norm) | torch.isinf(gen_norm)
-    nan_or_inf_per_image = nan_or_inf_mask.view(n_images, -1).any(dim=1).float().mean().item() * 100
-    
-    external_dict = {
-        "nan%": nan_or_inf_per_image,
-        "nan_step": avg_first_appearance
-    }
-    wandb.log(external_dict)
-
-    line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
-    print(line)
+        line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
+        print(line)
 
 # # # # # # # # B L O C K 4 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 

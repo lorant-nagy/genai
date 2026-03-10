@@ -6,6 +6,10 @@ from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 import hashlib
 
+FACTORY_CONFIG = "config/factories/factory_surface_response.yml"
+OUTPUT_DIR = "config/batch_cfgs/surface_response"
+MODE = "descartes"
+
 def is_sweep_value(value: Any) -> bool:
     """Check if a value is a list meant for sweeping (not a config list)."""
     if not isinstance(value, list):
@@ -256,9 +260,9 @@ def main():
     # args = parser.parse_args()
     
     class Args:
-        factory_config = "/home/lorantnagy/repositories/genai/config/factories/factory_step_experiment.yml"
-        output_dir = "/home/lorantnagy/repositories/genai/config/batch_cfgs/step_experiment"
-        mode = "hadamard"
+        factory_config = FACTORY_CONFIG
+        output_dir = OUTPUT_DIR
+        mode = MODE
 
     args = Args()
 

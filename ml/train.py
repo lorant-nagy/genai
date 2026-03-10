@@ -187,7 +187,8 @@ print(header)
 # # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 backward_cntr = 0
 loss_sum_interval = 0.0
-log_backward_freq = config.eval.log_backward_freq
+log_backward_freq = max(1, len(dataloader) // config.eval.evals_per_epoch)
+print(f"[bold blue]Evals per epoch:[/] [yellow]{config.eval.evals_per_epoch}[/] → log_backward_freq: {log_backward_freq}")
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 for epoch in range(config.train.n_epochs):
 

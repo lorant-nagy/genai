@@ -3,7 +3,10 @@
 Docker Sweep Runner - runs each config in a fresh container
 
 Usage:
-    python3 docker_sweep_runner.py config_folder/ --device cuda:0
+    python3 utils/docker_sweep.py config_folder/ --device 2
+
+Each container is pinned to the requested physical GPU via CUDA_VISIBLE_DEVICES,
+which remaps it to cuda:0 inside the container so train.py always uses --device 0.
 """
 
 import argparse
@@ -70,38 +73,73 @@ def format_eta_info(completed, total, avg_time_per_config, elapsed_time):
             f"(~{format_timedelta(estimated_remaining)} remaining)")
 
 
+def _parse_device_index(device) -> str | None:
+    """
+    Accept plain integers (0, 1, 2) or cuda:N strings.
+    Returns the bare integer string, e.g. "2", or None if device is None.
+    """
+    if device is None:
+        return None
+    s = str(device).strip()
+    if s.lower().startswith("cuda:"):
+        return s.split(":")[-1]
+    return s  # already a bare integer string
+
+
 def run_config_in_docker(config_path, device, compose_file="compose.yml"):
-    """Run training in a fresh Docker container."""
-    # Docker compose run command
+    """Run training in a fresh Docker container.
+
+    Device pinning strategy
+    -----------------------
+    We pass TWO pieces of information to docker so the physical GPU is
+    unambiguous regardless of how many GPUs are on the host:
+
+      -e CUDA_VISIBLE_DEVICES=N  remaps physical GPU N to cuda:0 inside
+                                 the container so train.py always uses 0
+
+    --gpus is intentionally omitted: older Docker Compose versions don't
+    support it as a `run` flag. CUDA_VISIBLE_DEVICES alone is sufficient.
+    """
+    device_idx = _parse_device_index(device)
+
     cmd = [
         "docker", "compose",
         "-f", compose_file,
         "run",
         "--rm",  # Remove container after completion
+    ]
+
+    if device_idx is not None:
+        # CUDA_VISIBLE_DEVICES remaps the physical GPU to cuda:0 inside the container.
+        # --gpus is intentionally omitted: older Docker Compose versions don't support
+        # it as a run flag. CUDA_VISIBLE_DEVICES alone is sufficient for device pinning.
+        cmd += ["-e", f"CUDA_VISIBLE_DEVICES={device_idx}"]
+
+    cmd += [
         "train",
         "python", "-m", "ml.train",
-        str(config_path)
+        str(config_path),
+        "--device", "0",   # always 0 — CUDA_VISIBLE_DEVICES handles remapping
     ]
-    
-    if device:
-        cmd.extend(["--device", device])
-    
+
     print(f"\n{'='*80}")
-    print(f"Running: {config_path.name}")
-    print(f"Command: {' '.join(cmd)}")
+    print(f"Running : {config_path.name}")
+    if device_idx is not None:
+        print(f"GPU     : physical device {device_idx}  →  cuda:0 inside container")
+    print(f"Command : {' '.join(cmd)}")
     print(f"{'='*80}\n")
-    
+
     config_start = time.time()
     result = subprocess.run(cmd)
     config_duration = time.time() - config_start
-    
+
     return result.returncode, config_duration
 
 def main():
     parser = argparse.ArgumentParser(description='Run all configs in separate Docker containers')
     parser.add_argument('config_dir', help='Directory containing config files')
     parser.add_argument('--log-file', default=None, help='Path to log file (auto-inferred if not provided)')
-    parser.add_argument('--device', default=None, help='Device (e.g., cuda:0)')
+    parser.add_argument('--device', default=None, help='Physical GPU index to pin (e.g. 0, 1, 2). Sets CUDA_VISIBLE_DEVICES inside the container so train.py always sees it as cuda:0.')
     parser.add_argument('--compose-file', default='compose.yml', help='Docker compose file')
     args = parser.parse_args()
     

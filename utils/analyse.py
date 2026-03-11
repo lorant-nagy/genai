@@ -28,14 +28,9 @@ import sys
 
 MODES = {
     '--nsteps':  ('utils.nsteps_analysis',             'n-steps analysis'),
-    '--epochs':  ('utils.epoch_analysis',              'epoch-wise analysis'),
-    '--partial': ('utils.profiler_analysis_partial',   'partial-run analysis'),
+    '--sweep-summary':  ('utils.sweep_summary',              'epoch-wise analysis'),
+    '--sweep-summary-partial': ('utils.sweep_summary_partial',   'partial-run analysis'),
 }
-DEFAULT = ('utils.profiler_analysis', 'standard analysis')
-
-# Keep the old flag name working as an alias
-ALIASES = {'--anal_through_epochs': '--epochs'}
-
 
 def main():
     if len(sys.argv) < 3:
@@ -44,14 +39,20 @@ def main():
 
     runs_folder  = sys.argv[1]
     project_name = sys.argv[2]
-    flags        = {ALIASES.get(f, f) for f in sys.argv[3:]}
+    flags        = set(sys.argv[3:])
 
     # Pick mode (first recognised flag wins)
-    module, label = DEFAULT
+    module, label = None, None
     for flag, (mod, lbl) in MODES.items():
         if flag in flags:
             module, label = mod, lbl
             break
+
+    if module is None:
+        print("No valid analysis mode specified. Please use one of the following flags:")
+        for flag in MODES.keys():
+            print(f"  {flag}")
+        sys.exit(1)
 
     print(f"Running {label}: {runs_folder} -> WandB project '{project_name}'")
 

@@ -55,10 +55,6 @@ class SuperlinearLangevin(ItoProcess):
     Samples from potential U(x) = (c_α/(α+1))|x|^(α+1) + (c_0/2)x^2
     """
     
-    # TRASH MODE: When True, always build a new score table with no dump on disk
-    # TRASH_SCORE_TABLE = True  # ← Changed to True
-    TRASH_SCORE_TABLE = True
-    
     def __init__(
         self,
         t0: float = 0.0,
@@ -97,44 +93,12 @@ class SuperlinearLangevin(ItoProcess):
                 t0=self.t0,
             )
             
-            # TRASH MODE: Build fresh table without registry or saving
-            if self.TRASH_SCORE_TABLE:
-                # Build temporary score table silently
-                self.score_table_obj = build_score_table(
-                    self, 
-                    score_config, 
-                    save_path=None  # Don't save
-                )
-            else:
-                # Normal mode: use registry system
-                from utils.score_table_registry import ScoreTableRegistry
-                
-                # Create/load registry
-                registry = ScoreTableRegistry(table_dir)
-                
-                # Get or create table entry (checks for existing matches)
-                table_id, table_path, is_new = registry.get_or_create_table(
-                    process=self,
-                    score_table_params=score_table_params,
-                    description=f"SuperlinearLangevin: α={alpha}, c_α={c_alpha}, c_0={c_0}, σ={sigma}, T={T}"
-                )
-                
-                self.score_table_id = table_id
-                
-                # Load or build (parallelization is automatic)
-                if not is_new and table_path.exists():
-                    print(f"[green]Loading existing score table (ID: {table_id})[/green]")
-                    self.score_table_obj = ScoreTable.load(str(table_path), self)
-                    print(f"[green]✓ Score table loaded successfully[/green]")
-                else:
-                    print(f"[blue]Building new score table (ID: {table_id})[/blue]")
-                    print(f"[yellow]This may take a while...[/yellow]")
-                    self.score_table_obj = build_score_table(
-                        self, 
-                        score_config, 
-                        save_path=str(table_path)
-                    )
-                    print(f"[green]✓ Score table built and saved[/green]")
+            self.score_table_obj = build_score_table(
+                self, 
+                score_config, 
+                save_path=None  # Don't save
+            )
+            
     
     def drift(self, x: torch.Tensor, t: float) -> torch.Tensor:
         power_term = torch.pow(torch.abs(x), self.alpha) * torch.sign(x)

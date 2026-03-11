@@ -6,6 +6,7 @@ import numpy as np
 
 import argparse
 import os
+import shutil
 import sys
 sys.path.append(os.path.abspath(".."))
 
@@ -98,226 +99,236 @@ os.makedirs(os.path.join(run_dir, "states"), exist_ok=True)
 
 # # # # # # # # B L O C K 2 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
-# dump config
-with open(os.path.join(run_dir, "config.yaml"), "w") as f:
-    import yaml
-    yaml.dump(config.to_dict(), f)
+try:
 
-init_wandb(config, petname_str, run_dir)
+    # dump config
+    with open(os.path.join(run_dir, "config.yaml"), "w") as f:
+        import yaml
+        yaml.dump(config.to_dict(), f)
 
-wandb.log({"simple_log": SIMPLE_LOG})
+    init_wandb(config, petname_str, run_dir)
 
-normalizer_name = config.dataset_train.normalizer_cls
-normalizer_parameters = config.dataset_train.normalizer_params
-normalizer = REGISTRY[normalizer_name](**normalizer_parameters.to_dict())
+    wandb.log({"simple_log": SIMPLE_LOG})
 
-dataset_name = config.dataset_train.dataset_cls
-dataset_parameters = config.dataset_train.dataset_params
-dataset_parameters.normalizer = normalizer
-dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
-dataloader = DataLoader(dataset, **config.dataloader.to_dict())
+    normalizer_name = config.dataset_train.normalizer_cls
+    normalizer_parameters = config.dataset_train.normalizer_params
+    normalizer = REGISTRY[normalizer_name](**normalizer_parameters.to_dict())
 
-eval_dl_kwargs = dict(config.dataloader.to_dict())
-eval_dl_kwargs["shuffle"] = False      # MUST: same real subset across runs
-eval_dl_kwargs["drop_last"] = False
-eval_dl_kwargs["num_workers"] = 0      # strongly recommended for strict determinism
-eval_dataloader = DataLoader(dataset, **eval_dl_kwargs)
+    dataset_name = config.dataset_train.dataset_cls
+    dataset_parameters = config.dataset_train.dataset_params
+    dataset_parameters.normalizer = normalizer
+    dataset = REGISTRY[dataset_name](**dataset_parameters.to_dict())
+    dataloader = DataLoader(dataset, **config.dataloader.to_dict())
 
-model_name = config.model.cls
-model_parameters = config.model.model_params
-model_parameters.in_channels = dataset.C
-model = REGISTRY[model_name](**model_parameters.to_dict())
-model = model.to(DEVICE)
-wandb.watch(model, log="all", log_freq=100)
+    eval_dl_kwargs = dict(config.dataloader.to_dict())
+    eval_dl_kwargs["shuffle"] = False      # MUST: same real subset across runs
+    eval_dl_kwargs["drop_last"] = False
+    eval_dl_kwargs["num_workers"] = 0      # strongly recommended for strict determinism
+    eval_dataloader = DataLoader(dataset, **eval_dl_kwargs)
 
-optimizer_name = config.train.optimizer_cls
-optimizer_parameters = config.train.optimizer_params
-optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **optimizer_parameters.to_dict())
+    model_name = config.model.cls
+    model_parameters = config.model.model_params
+    model_parameters.in_channels = dataset.C
+    model = REGISTRY[model_name](**model_parameters.to_dict())
+    model = model.to(DEVICE)
+    wandb.watch(model, log="all", log_freq=100)
 
-process_name = config.corruption.process_cls
-process_parameters = config.corruption.process_params
-image_space_dim = dataset.C * dataset.H * dataset.W
+    optimizer_name = config.train.optimizer_cls
+    optimizer_parameters = config.train.optimizer_params
+    optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **optimizer_parameters.to_dict())
 
-process_parameters.table_dir = table_dir
-process_parameters.device = DEVICE
+    process_name = config.corruption.process_cls
+    process_parameters = config.corruption.process_params
+    image_space_dim = dataset.C * dataset.H * dataset.W
 
-proc = REGISTRY[process_name](**process_parameters.to_dict())
+    process_parameters.table_dir = table_dir
+    process_parameters.device = DEVICE
 
-integrator_name = config.corruption.integrator_cls
-integrator_parameters = config.corruption.integrator_params
-integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
+    proc = REGISTRY[process_name](**process_parameters.to_dict())
 
-corruptor_parameters = config.corruption.corruptor_params
-corruptor_parameters.integrator = integrator
-corruptor_parameters.process = proc
-corruptor = Corruptor(**corruptor_parameters.to_dict())
+    integrator_name = config.corruption.integrator_cls
+    integrator_parameters = config.corruption.integrator_params
+    integrator = REGISTRY[integrator_name](**integrator_parameters.to_dict())
 
-loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
-stationary_sampler = StationarySampler(config, device=DEVICE)
+    corruptor_parameters = config.corruption.corruptor_params
+    corruptor_parameters.integrator = integrator
+    corruptor_parameters.process = proc
+    corruptor = Corruptor(**corruptor_parameters.to_dict())
 
-EVAL_SEED = int(getattr(config.eval, "seed", 0))  # if not in config, defaults to 0
+    loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
+    stationary_sampler = StationarySampler(config, device=DEVICE)
 
-x0_eval = stationary_sampler(
-    (config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W),
-    seed=EVAL_SEED
-)
+    EVAL_SEED = int(getattr(config.eval, "seed", 0))  # if not in config, defaults to 0
 
-BENCHMARK_METRICS = list(config.eval.benchmark_metrics)
+    x0_eval = stationary_sampler(
+        (config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W),
+        seed=EVAL_SEED
+    )
 
-print("[bold green]---------------------------------------------------------------[/bold green]")
-print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/bold green]")
-print("[bold green]---------------------------------------------------------------[/bold green]")
+    BENCHMARK_METRICS = list(config.eval.benchmark_metrics)
 
-print(f"\n[bold cyan]TRAINING:[/bold cyan]")
+    print("[bold green]---------------------------------------------------------------[/bold green]")
+    print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/bold green]")
+    print("[bold green]---------------------------------------------------------------[/bold green]")
 
-average_loss_per_sample = 0.0
-loss_evo = []
+    print(f"\n[bold cyan]TRAINING:[/bold cyan]")
 
-real_norm = collect_n_images(eval_dataloader, config.eval.n_metric_samples, device=DEVICE)
-real_true = normalizer.denormalize(real_norm).clamp(0, 1)
-cache_real(real_true, device=torch.device(DEVICE), eval_cfg=config.eval)
+    average_loss_per_sample = 0.0
+    loss_evo = []
 
-best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
-metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + active_scalar_keys()}
+    real_norm = collect_n_images(eval_dataloader, config.eval.n_metric_samples, device=DEVICE)
+    real_true = normalizer.denormalize(real_norm).clamp(0, 1)
+    cache_real(real_true, device=torch.device(DEVICE), eval_cfg=config.eval)
 
-print_tab_w = 16
-header = create_header(metrics_evo, print_tab_w, external = ["corrupt_img%", "corrupt_px%", "first_corrupt_step"])
-print(header)
+    best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
+    metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + active_scalar_keys()}
 
-# # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-backward_cntr = 0
-loss_sum_interval = 0.0
-log_backward_freq = max(1, len(dataloader) // config.eval.evals_per_epoch)
-print(f"[bold blue]Evals per epoch:[/] [yellow]{config.eval.evals_per_epoch}[/] → log_backward_freq: {log_backward_freq}")
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-for epoch in range(config.train.n_epochs):
+    print_tab_w = 16
+    header = create_header(metrics_evo, print_tab_w, external = ["corrupt_img%", "corrupt_px%", "first_corrupt_step"])
+    print(header)
 
-    for c, batch in enumerate(dataloader):
-        backward_cntr += 1
-        batch = batch.to(DEVICE)
-        corrupted = corruptor(batch)
-        score = proc.score(corrupted['x'], batch, corrupted['t'])
-        prediction = model(corrupted['x'], corrupted['t'])
-        output = loss_fn(prediction, score)
+    # # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+    backward_cntr = 0
+    loss_sum_interval = 0.0
+    log_backward_freq = max(1, len(dataloader) // config.eval.evals_per_epoch)
+    print(f"[bold blue]Evals per epoch:[/] [yellow]{config.eval.evals_per_epoch}[/] → log_backward_freq: {log_backward_freq}")
+    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+    for epoch in range(config.train.n_epochs):
 
-        loss_sum_interval += output.item()
+        for c, batch in enumerate(dataloader):
+            backward_cntr += 1
+            batch = batch.to(DEVICE)
+            corrupted = corruptor(batch)
+            score = proc.score(corrupted['x'], batch, corrupted['t'])
+            prediction = model(corrupted['x'], corrupted['t'])
+            output = loss_fn(prediction, score)
 
-        output.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+            loss_sum_interval += output.item()
 
-        if backward_cntr % log_backward_freq != 0:
-            continue
+            output.backward()
+            optimizer.step()
+            optimizer.zero_grad()
 
-        # # # # # # # # E V A L  B L O C K # # # # # # # # # # # # # # #
+            if backward_cntr % log_backward_freq != 0:
+                continue
 
-        avg_loss = loss_sum_interval / log_backward_freq
-        loss_sum_interval = 0.0
-        loss_evo.append(avg_loss)
+            # # # # # # # # E V A L  B L O C K # # # # # # # # # # # # # # #
 
-        metrics_evo['epochs'].append(backward_cntr)
-        metrics_evo['loss'].append(avg_loss)
+            avg_loss = loss_sum_interval / log_backward_freq
+            loss_sum_interval = 0.0
+            loss_evo.append(avg_loss)
 
-        model.eval()
-        CHW = (dataset.C, dataset.H, dataset.W)
-        reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
-        backward_solver = SDESolver(reverse_sde, integrator)
+            metrics_evo['epochs'].append(backward_cntr)
+            metrics_evo['loss'].append(avg_loss)
 
-        with torch.no_grad():
-            t_grid, X = backward_solver.simulate(
-                x0_eval,
-                n_steps=config.corruption.corruptor_params.n_steps,
-                seed=EVAL_SEED
+            model.eval()
+            CHW = (dataset.C, dataset.H, dataset.W)
+            reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+            backward_solver = SDESolver(reverse_sde, integrator)
+
+            with torch.no_grad():
+                t_grid, X = backward_solver.simulate(
+                    x0_eval,
+                    n_steps=config.corruption.corruptor_params.n_steps,
+                    seed=EVAL_SEED
+                )
+                gen_norm = X[-1].detach()
+
+                total_steps = len(X)
+                first_appearance = torch.full_like(gen_norm, total_steps, dtype=torch.float32)
+
+                for step_idx, X_t in enumerate(X):
+                    nan_or_inf_mask = torch.isnan(X_t) | torch.isinf(X_t)
+                    newly_bad = nan_or_inf_mask & (first_appearance == total_steps)
+                    first_appearance[newly_bad] = step_idx
+
+                affected_pixels = first_appearance < total_steps
+                avg_first_appearance = first_appearance[affected_pixels].mean().item() if affected_pixels.any() else total_steps
+
+                gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+
+            metrics_results = compute_metrics(real_true, gen_true, kid_seed=EVAL_SEED)
+            fill_metrics_results(metrics_evo, metrics_results)
+
+            sample_grid_matplotlib = generate_samples_matplotlib(
+                model=model,
+                process=proc,
+                integrator=integrator,
+                normalizer=normalizer,
+                config=config,
+                dataset=dataset,
+                device=DEVICE,
+                n_samples=8,
+                n_steps=config.corruption.corruptor_params.n_steps
             )
-            gen_norm = X[-1].detach()
 
-            total_steps = len(X)
-            first_appearance = torch.full_like(gen_norm, total_steps, dtype=torch.float32)
+            model.train()
+            # # e n d  o f  e v a l  b l o c k # # # # # # #
 
-            for step_idx, X_t in enumerate(X):
-                nan_or_inf_mask = torch.isnan(X_t) | torch.isinf(X_t)
-                newly_bad = nan_or_inf_mask & (first_appearance == total_steps)
-                first_appearance[newly_bad] = step_idx
+            if sample_grid_matplotlib is not None:
+                wandb.log({"generated_samples": sample_grid_matplotlib, "backward_step": backward_cntr})
 
-            affected_pixels = first_appearance < total_steps
-            avg_first_appearance = first_appearance[affected_pixels].mean().item() if affected_pixels.any() else total_steps
+            for metric in BENCHMARK_METRICS:
+                if metric in metrics_evo and len(metrics_evo[metric]) > 0:
+                    maybe_update_best(metric, metrics_evo[metric][-1], backward_cntr, best_models, model)
 
-            gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+            log_wandb_metrics(metrics_evo)
 
-        metrics_results = compute_metrics(real_true, gen_true, kid_seed=EVAL_SEED)
-        fill_metrics_results(metrics_evo, metrics_results)
+            # NaN/Inf diagnostics
+            n_images = gen_norm.shape[0]
+            nan_or_inf_mask = torch.isnan(gen_norm) | torch.isinf(gen_norm)
+            per_image_mask = nan_or_inf_mask.view(n_images, -1)  # [N, C*H*W]
 
-        sample_grid_matplotlib = generate_samples_matplotlib(
-            model=model,
-            process=proc,
-            integrator=integrator,
-            normalizer=normalizer,
-            config=config,
-            dataset=dataset,
-            device=DEVICE,
-            n_samples=8,
-            n_steps=config.corruption.corruptor_params.n_steps
-        )
+            # % of images containing at least one bad pixel
+            corrupt_img_pct = per_image_mask.any(dim=1).float().mean().item() * 100
 
-        model.train()
-        # # e n d  o f  e v a l  b l o c k # # # # # # #
+            # % of pixels that are bad, averaged only over corrupted images
+            corrupted_images = per_image_mask[per_image_mask.any(dim=1)]
+            corrupt_px_pct = corrupted_images.float().mean().item() * 100 if corrupted_images.shape[0] > 0 else 0.0
 
-        if sample_grid_matplotlib is not None:
-            wandb.log({"generated_samples": sample_grid_matplotlib, "backward_step": backward_cntr})
+            external_dict = {
+                "corrupt_img%": corrupt_img_pct,
+                "corrupt_px%": corrupt_px_pct,
+                "first_corrupt_step": avg_first_appearance,
+            }
+            wandb.log(external_dict)
 
-        for metric in BENCHMARK_METRICS:
-            if metric in metrics_evo and len(metrics_evo[metric]) > 0:
-                maybe_update_best(metric, metrics_evo[metric][-1], backward_cntr, best_models, model)
+            line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
+            print(line)
 
-        log_wandb_metrics(metrics_evo)
+    # # # # # # # # B L O C K 4 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
-        # NaN/Inf diagnostics
-        n_images = gen_norm.shape[0]
-        nan_or_inf_mask = torch.isnan(gen_norm) | torch.isinf(gen_norm)
-        per_image_mask = nan_or_inf_mask.view(n_images, -1)  # [N, C*H*W]
+    log_wandb_best(best_models, config)
 
-        # % of images containing at least one bad pixel
-        corrupt_img_pct = per_image_mask.any(dim=1).float().mean().item() * 100
+    wandb_log_best_and_plot(
+        model=model,
+        proc=proc,
+        config=config,
+        integrator=integrator,
+        stationary_sampler=stationary_sampler,
+        normalizer=normalizer,
+        best_models=best_models,
+        C=dataset.C, H=dataset.H, W=dataset.W,
+        epoch=config.train.n_epochs,
+    )
 
-        # % of pixels that are bad, averaged only over corrupted images
-        corrupted_images = per_image_mask[per_image_mask.any(dim=1)]
-        corrupt_px_pct = corrupted_images.float().mean().item() * 100 if corrupted_images.shape[0] > 0 else 0.0
+    dump_dict_to_json(metrics_evo, dir=run_dir, filename="metrics_evo.json")
+    #dump the simple log txt
+    with open(os.path.join(run_dir, "simple_log.txt"), "a") as f:
+        f.write(f"{petname_str}_{time_str} : {SIMPLE_LOG}\n")
 
-        external_dict = {
-            "corrupt_img%": corrupt_img_pct,
-            "corrupt_px%": corrupt_px_pct,
-            "first_corrupt_step": avg_first_appearance,
-        }
-        wandb.log(external_dict)
+    wandb.finish()
+    torch.cuda.empty_cache()
+    del model
 
-        line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
-        print(line)
-
-# # # # # # # # B L O C K 4 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-
-log_wandb_best(best_models, config)
-
-wandb_log_best_and_plot(
-    model=model,
-    proc=proc,
-    config=config,
-    integrator=integrator,
-    stationary_sampler=stationary_sampler,
-    normalizer=normalizer,
-    best_models=best_models,
-    C=dataset.C, H=dataset.H, W=dataset.W,
-    epoch=config.train.n_epochs,
-)
-
-dump_dict_to_json(metrics_evo, dir=run_dir, filename="metrics_evo.json")
-#dump the simple log txt
-with open(os.path.join(run_dir, "simple_log.txt"), "a") as f:
-    f.write(f"{petname_str}_{time_str} : {SIMPLE_LOG}\n")
-
-wandb.finish()
-torch.cuda.empty_cache()
-del model
-
-print("[bold green]---------------------------------------------------------------[/bold green]")
-print(f"[bold green]RUN ENDED -- NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/bold green]")
-print("[bold green]---------------------------------------------------------------[/bold green]")
+    print("[bold green]---------------------------------------------------------------[/bold green]")
+    print(f"[bold green]RUN ENDED -- NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/bold green]")
+    print("[bold green]---------------------------------------------------------------[/bold green]")
+except Exception:
+    print("[bold red]Training failed — cleaning up run dir[/bold red]")
+    try:
+        wandb.finish(exit_code=1)
+    except Exception:
+        pass
+    shutil.rmtree(run_dir, ignore_errors=True)
+    raise

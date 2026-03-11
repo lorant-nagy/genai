@@ -110,6 +110,7 @@ class LeNetBackbone:
         self.embedder   = nn.Sequential(*list(full_net.children())[:-2]).to(device)
 
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
         if x.shape[-1] != 28 or x.shape[-2] != 28:
             x = torch.nn.functional.interpolate(
                 x, size=(28, 28), mode="bilinear", align_corners=False
@@ -223,7 +224,8 @@ class W1Metric:
 
     def compute(self, x_gen: torch.Tensor, **_) -> float:
         Xa = self._real.reshape(self._real.shape[0], -1).cpu().numpy().astype(np.float64)
-        Xb = x_gen.reshape(x_gen.shape[0], -1).cpu().numpy().astype(np.float64)
+        x_gen_clean = torch.nan_to_num(x_gen, nan=0.0, posinf=1.0, neginf=0.0)
+        Xb = x_gen_clean.reshape(x_gen.shape[0], -1).cpu().numpy().astype(np.float64)
         return _ot_w1(Xa, Xb)
 
 
@@ -243,7 +245,8 @@ class W1SliceMetric:
     def compute(self, x_gen: torch.Tensor, **_) -> float:
         dev = self.device
         Af  = self._real.reshape(self._real.shape[0], -1).to(dev, dtype=torch.float32)
-        Bf  = x_gen.reshape(x_gen.shape[0], -1).to(dev, dtype=torch.float32)
+        x_gen_clean = torch.nan_to_num(x_gen, nan=0.0, posinf=1.0, neginf=0.0)
+        Bf  = x_gen_clean.reshape(x_gen.shape[0], -1).to(dev, dtype=torch.float32)
         D   = Af.shape[1]
         gen = torch.Generator(device=dev)
         if self.seed is not None:

@@ -181,7 +181,7 @@ best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for
 metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + active_scalar_keys()}
 
 print_tab_w = 16
-header = create_header(metrics_evo, print_tab_w, external = ["nan%", "nan_step"])
+header = create_header(metrics_evo, print_tab_w, external = ["corrupt_img%", "corrupt_px%", "first_corrupt_step"])
 print(header)
 
 # # # # # # # # B L O C K 3 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
@@ -274,11 +274,19 @@ for epoch in range(config.train.n_epochs):
         # NaN/Inf diagnostics
         n_images = gen_norm.shape[0]
         nan_or_inf_mask = torch.isnan(gen_norm) | torch.isinf(gen_norm)
-        nan_or_inf_per_image = nan_or_inf_mask.view(n_images, -1).any(dim=1).float().mean().item() * 100
+        per_image_mask = nan_or_inf_mask.view(n_images, -1)  # [N, C*H*W]
+
+        # % of images containing at least one bad pixel
+        corrupt_img_pct = per_image_mask.any(dim=1).float().mean().item() * 100
+
+        # % of pixels that are bad, averaged only over corrupted images
+        corrupted_images = per_image_mask[per_image_mask.any(dim=1)]
+        corrupt_px_pct = corrupted_images.float().mean().item() * 100 if corrupted_images.shape[0] > 0 else 0.0
 
         external_dict = {
-            "nan%": nan_or_inf_per_image,
-            "nan_step": avg_first_appearance
+            "corrupt_img%": corrupt_img_pct,
+            "corrupt_px%": corrupt_px_pct,
+            "first_corrupt_step": avg_first_appearance,
         }
         wandb.log(external_dict)
 

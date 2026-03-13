@@ -220,6 +220,9 @@ def main():
                         help="Path to a failed_configs_*.txt from a previous sweep. "
                              "Only those configs will be run. "
                              "A new global log is created with a _retry suffix.")
+    parser.add_argument("--snapshot",      default=None, metavar="SNAPSHOT_DIR",
+                        help="Reuse an existing snapshot directory instead of creating a new one. "
+                             "Useful with --retry-failed to run with the exact same code as the original sweep.")
     parser.add_argument("--no-snapshot",   action="store_true",
                         help="Skip code snapshot and use the live workspace.")
     args = parser.parse_args()
@@ -270,10 +273,16 @@ def main():
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Code snapshot ─────────────────────────────────────────────────────────
-    snapshot_dir = None
     commit, branch = get_git_info(repo_root)
 
-    if args.no_snapshot:
+    if args.snapshot:
+        snapshot_dir = Path(args.snapshot)
+        if not snapshot_dir.exists():
+            print(f"Snapshot directory not found: {snapshot_dir}")
+            sys.exit(1)
+        print(f"\nSnapshot : reusing  {snapshot_dir}  [{branch} @ {commit}]")
+    elif args.no_snapshot:
+        snapshot_dir = None
         print(f"\nSnapshot : disabled (live workspace)  [{branch} @ {commit}]")
     else:
         print(f"\nSnapshotting repo  [{branch} @ {commit}] ...", end=" ", flush=True)
@@ -384,9 +393,13 @@ def main():
     if failed:
         failed_list_path = write_failed_list(failed, log_file_path)
         print(f"\nFailed list written to: {failed_list_path}")
-        print(f"To retry:  python3 utils/docker_sweep.py {args.config_dir} "
-              f"--retry-failed {failed_list_path}"
-              + (f" --device {args.device}" if args.device else ""))
+        hint = (f"python3 utils/docker_sweep.py {args.config_dir} "
+                f"--retry-failed {failed_list_path}")
+        if snapshot_dir:
+            hint += f" --snapshot {snapshot_dir}"
+        if args.device:
+            hint += f" --device {args.device}"
+        print(f"To retry:  {hint}")
 
     if snapshot_dir:
         print(f"\nSnapshot at: {snapshot_dir}")

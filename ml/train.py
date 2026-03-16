@@ -14,7 +14,6 @@ import torch
 from torch.utils.data import DataLoader
 torch.set_default_dtype(torch.float32)
 
-from utils.viz import generate_samples
 from utils.helpers import (
     init_wandb,
     maybe_update_best,
@@ -32,9 +31,7 @@ from utils.helpers import (
 
 from utils.registry import REGISTRY
 
-import ml.metrics  # registers all metric classes into REGISTRY
-from ml.eval import compute_metrics, cache_real, active_scalar_keys
-from ml.eval import METRIC_KEYS
+from ml.metrics import W1Evaluator
 
 from diff.corruptor import Corruptor
 from diff.sim_core import SDESolver
@@ -165,7 +162,7 @@ try:
         seed=EVAL_SEED
     )
 
-    BENCHMARK_METRICS = list(config.eval.benchmark_metrics)
+    BENCHMARK_METRICS = ["w1"]
 
     print("[bold green]---------------------------------------------------------------[/bold green]")
     print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/bold green]")
@@ -178,10 +175,10 @@ try:
 
     real_norm = collect_n_images(eval_dataloader, config.eval.n_metric_samples, device=DEVICE)
     real_true = normalizer.denormalize(real_norm).clamp(0, 1)
-    cache_real(real_true, device=torch.device(DEVICE), eval_cfg=config.eval)
+    w1_evaluator = W1Evaluator(real_true)
 
     best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
-    metrics_evo = {key : [] for key in ['epochs', 'loss', 'nan'] + active_scalar_keys()}
+    metrics_evo = {key: [] for key in ['epochs', 'loss', 'nan', 'w1']}
 
     print_tab_w = 16
     header = create_header(metrics_evo, print_tab_w, external = ["corrupt_img%", "corrupt_px%", "first_corrupt_step"])
@@ -247,7 +244,7 @@ try:
 
                 gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
 
-            metrics_results = compute_metrics(real_true, gen_true, kid_seed=EVAL_SEED)
+            metrics_results = {"w1": w1_evaluator.compute(gen_true)}
             fill_metrics_results(metrics_evo, metrics_results)
 
             sample_grid_matplotlib = generate_samples_matplotlib(

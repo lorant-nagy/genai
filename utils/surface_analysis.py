@@ -227,7 +227,7 @@ def plot_heatmaps(metric: str, table: dict,
             vals = [grids[n][ai, ti] for n in nsteps_vals
                     if np.isfinite(grids[n][ai, ti])]
             if vals:
-                sup_grid[ai, ti] = max(vals)   # sup = max (lower=better for distances → use min below)
+                sup_grid[ai, ti] = min(vals)   # inf over n_steps (lower=better)
 
     # For distance-like metrics lower is better → use min for "best"
     # We label it "best over n_steps" and let the colour speak
@@ -269,7 +269,7 @@ def plot_heatmaps(metric: str, table: dict,
     ax.set_yticks(range(len(alpha_vals)))
     ax.set_yticklabels([f"α={a}" for a in alpha_vals])
     ax.set_xlabel("T")
-    ax.set_title("best over n_steps", fontsize=10, fontweight="bold")
+    ax.set_title("inf over n_steps", fontsize=10, fontweight="bold")
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     fig.suptitle(f"{metric.upper()}  —  T × alpha heatmaps",
@@ -285,7 +285,7 @@ def _annotate_heatmap(ax, grid):
         for ti in range(grid.shape[1]):
             v = grid[ai, ti]
             if np.isfinite(v):
-                ax.text(ti, ai, f"{v:.2f}",
+                ax.text(ti, ai, f"{v:.4f}",
                         ha="center", va="center",
                         fontsize=7, color="white",
                         path_effects=[

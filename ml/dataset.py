@@ -72,6 +72,50 @@ class MNIST1Dataset(torch.utils.data.Dataset):
 
 
 @register
+class FashionMNISTDataset(torch.utils.data.Dataset):
+    """FashionMNIST dataset — drop-in replacement for MNIST1Dataset."""
+
+    def __init__(self, data_root=None, image_size=28, split="train", normalizer=None, interpolation=None, **kwargs):
+        from torchvision import datasets, transforms
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+
+        is_train = (split == "train")
+        mnist = datasets.FashionMNIST(
+            root=temp_dir,
+            train=is_train,
+            download=True
+        )
+
+        self.data = [mnist[i][0] for i in range(len(mnist))]
+
+        print(f"FashionMNISTDataset initialized:")
+        print(f"  - Split: {split}")
+        print(f"  - Total images: {len(self.data)}")
+        print(f"  - Image size: {image_size}x{image_size}")
+
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor()
+        ])
+
+        self.normalizer = normalizer
+        self.C = 1
+        self.H = image_size
+        self.W = image_size
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img = self.data[idx]
+        img = self.transform(img)
+        img = self.normalizer.normalize(img)
+        return img
+
+
+@register
 class RectanglesDataset(Dataset):
     """
     Synthetic dataset generating random rectangles.
@@ -466,5 +510,3 @@ class StationaryDataset(Dataset):
         sample = self.normalizer.normalize(sample)
         
         return sample.to(dtype=torch.float32)
-
-

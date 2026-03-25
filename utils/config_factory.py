@@ -6,10 +6,6 @@ from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 import hashlib
 
-FACTORY_CONFIG = "config/factories/factory_surface_response.yml"
-OUTPUT_DIR = "config/batch_cfgs/surface_response"
-MODE = "descartes"
-
 def is_sweep_value(value: Any) -> bool:
     """Check if a value is a list meant for sweeping (not a config list)."""
     if not isinstance(value, list):
@@ -236,35 +232,28 @@ def save_configs(configs: List[Tuple[str, Dict]], output_dir: Path) -> None:
     print(f"Manifest saved to: {output_dir / 'manifest.yml'}")
 
 def main():
-    # parser = argparse.ArgumentParser(
-    #     description='Generate config files from a factory config with parameter sweeps'
-    # )
-    # parser.add_argument(
-    #     'factory_config',
-    #     type=str,
-    #     help='Path to factory config YAML file'
-    # )
-    # parser.add_argument(
-    #     'output_dir',
-    #     type=str,
-    #     help='Output directory for generated configs'
-    # )
-    # parser.add_argument(
-    #     '--mode',
-    #     type=str,
-    #     choices=['descartes', 'hadamard'],
-    #     default='descartes',
-    #     help='Sweep mode: descartes (Cartesian product, default) or hadamard (pointwise/element-wise)'
-    # )
+    parser = argparse.ArgumentParser(
+        description='Generate config files from a factory config with parameter sweeps'
+    )
+    parser.add_argument(
+        'factory_config',
+        type=str,
+        help='Path to factory config YAML file'
+    )
+    parser.add_argument(
+        'output_dir',
+        type=str,
+        help='Output directory for generated configs'
+    )
+    parser.add_argument(
+        '--mode',
+        type=str,
+        choices=['descartes', 'hadamard'],
+        default='descartes',
+        help='Sweep mode: descartes (Cartesian product, default) or hadamard (pointwise/element-wise)'
+    )
     
-    # args = parser.parse_args()
-    
-    class Args:
-        factory_config = FACTORY_CONFIG
-        output_dir = OUTPUT_DIR
-        mode = MODE
-
-    args = Args()
+    args = parser.parse_args()
 
     # Load factory config
     factory_path = Path(args.factory_config)

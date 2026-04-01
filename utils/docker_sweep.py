@@ -27,7 +27,6 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
-import random
 import yaml
 import time
 
@@ -168,7 +167,48 @@ def _parse_device_index(device):
     return s
 
 
-# ── Docker runner ─────────────────────────────────────────────────────────────
+# ── Difficulty ordering ───────────────────────────────────────────────────────
+
+# Set to True to run hardest configs first (large T, large alpha, large n_steps).
+# Set to False to restore random ordering.
+SORT_BY_DIFFICULTY = True
+
+def _difficulty_key(config_path: Path) -> tuple:
+    """
+    Parse T, alpha, n_steps from the config filename and return a difficulty
+    tuple (descending: largest values = hardest = run first).
+    Falls back to 0 for any axis not found in the filename.
+
+    Filename format produced by config_factory.py, e.g.:
+        T_8p0__alpha_2p5__n_steps_1000.yml
+    """
+    name = config_path.stem   # strip .yml
+
+    def _extract(tag: str) -> float:
+        # match  __<tag>_<number>  or  ^<tag>_<number>
+        # requires __ separator so e.g. "c_0_0p5" doesn't bleed into "T" or "alpha"
+        import re
+        m = re.search(rf"(?:^|__){re.escape(tag)}_([0-9]+(?:p[0-9]+)?)", name)
+        if m:
+            return float(m.group(1).replace("p", "."))
+        return 0.0
+
+    T       = _extract("T")
+    alpha   = _extract("alpha")
+    n_steps = _extract("n_steps")
+
+    # Return negated so that sorted() puts the hardest (largest) first
+    return (-T, -alpha, -n_steps)
+
+
+def sort_configs_by_difficulty(configs: list) -> list:
+    if not SORT_BY_DIFFICULTY:
+        import random
+        random.shuffle(configs)
+        return configs
+    return sorted(configs, key=_difficulty_key)
+
+
 
 def run_config_in_docker(config_path, device, compose_file, snapshot_dir):
     """
@@ -289,7 +329,7 @@ def main():
         snapshot_dir = snapshot_repo(repo_root, log_file_path.parent)
         print(f"done.\n  -> {snapshot_dir}")
 
-    random.shuffle(configs)
+    configs = sort_configs_by_difficulty(configs)
 
     print(f"\nConfigs to run : {len(configs)}")
     print(f"Device         : {args.device or 'auto-detect'}")

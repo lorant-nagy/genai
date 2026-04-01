@@ -31,6 +31,7 @@ MODES = {
     '--sweep-summary':      ('utils.sweep_summary',      'sweep summary'),
     '--sweep-summary-partial': ('utils.sweep_summary_partial', 'partial sweep summary'),
     '--surface':            ('utils.surface_analysis',   'T × alpha × n_steps surface analysis'),
+    '--heatmap':            ('utils.heatmap_analysis',   'custom heatmap'),
 }
 
 def main():
@@ -57,6 +58,7 @@ def main():
 
     print(f"Running {label}: {runs_folder} -> WandB project '{project_name}'")
 
+    extra = [a for a in sys.argv[3:] if a != flag]
     cmd = [
         "docker", "compose",
         "run", "--rm",
@@ -64,6 +66,7 @@ def main():
         "python", "-m", module,
         runs_folder,
         project_name,
+        *extra,
     ]
 
     result = subprocess.run(cmd)

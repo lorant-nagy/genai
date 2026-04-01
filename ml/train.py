@@ -223,26 +223,70 @@ try:
             reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
             backward_solver = SDESolver(reverse_sde, integrator)
 
+            # ── Chunked reverse simulation ─────────────────────────────────
+            # Run the reverse SDE in chunks to avoid OOM in the attention
+            # layer (which is quadratic in batch size).  NaN/Inf diagnostics
+            # are accumulated across chunks so the logged percentages are
+            # identical to what a single-batch run would produce.
+            EVAL_CHUNK = 256
+
+            gen_norm_chunks        = []
+            corrupt_img_flags      = []   # bool per image: has at least one bad pixel
+            corrupt_px_sums        = []   # bad-pixel fraction per corrupted image
+            first_appearance_list  = []   # first-bad-step per pixel, flattened
+
+            n_steps_eval = config.corruption.corruptor_params.n_steps
+
             with torch.no_grad():
-                t_grid, X = backward_solver.simulate(
-                    x0_eval,
-                    n_steps=config.corruption.corruptor_params.n_steps,
-                    seed=EVAL_SEED
-                )
-                gen_norm = X[-1].detach()
+                for chunk in x0_eval.split(EVAL_CHUNK):
+                    t_grid, X_chunk = backward_solver.simulate(
+                        chunk,
+                        n_steps=n_steps_eval,
+                        seed=EVAL_SEED,
+                    )
+                    total_steps = len(X_chunk)
+                    final        = X_chunk[-1].detach()          # (chunk, C, H, W)
 
-                total_steps = len(X)
-                first_appearance = torch.full_like(gen_norm, total_steps, dtype=torch.float32)
+                    # ── NaN first-appearance tracking ──────────────────────
+                    first_app = torch.full_like(final, total_steps, dtype=torch.float32)
+                    for step_idx, X_t in enumerate(X_chunk):
+                        bad       = torch.isnan(X_t) | torch.isinf(X_t)
+                        newly_bad = bad & (first_app == total_steps)
+                        first_app[newly_bad] = step_idx
 
-                for step_idx, X_t in enumerate(X):
-                    nan_or_inf_mask = torch.isnan(X_t) | torch.isinf(X_t)
-                    newly_bad = nan_or_inf_mask & (first_appearance == total_steps)
-                    first_appearance[newly_bad] = step_idx
+                    affected = first_app < total_steps
+                    if affected.any():
+                        first_appearance_list.append(first_app[affected])
 
-                affected_pixels = first_appearance < total_steps
-                avg_first_appearance = first_appearance[affected_pixels].mean().item() if affected_pixels.any() else total_steps
+                    # ── Per-image / per-pixel corrupt stats ────────────────
+                    nan_mask   = torch.isnan(final) | torch.isinf(final)
+                    per_img    = nan_mask.view(final.shape[0], -1)   # (chunk, C*H*W)
+                    img_flags  = per_img.any(dim=1)                  # (chunk,) bool
+                    corrupt_img_flags.append(img_flags)
 
-                gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+                    bad_imgs = per_img[img_flags]
+                    if bad_imgs.shape[0] > 0:
+                        corrupt_px_sums.append(bad_imgs.float().mean(dim=1))  # per corrupted image
+
+                    gen_norm_chunks.append(final)
+
+            # ── Reassemble ────────────────────────────────────────────────
+            gen_norm  = torch.cat(gen_norm_chunks, dim=0)           # (N, C, H, W)
+            gen_true  = normalizer.denormalize(gen_norm).clamp(0, 1)
+
+            # ── Aggregate NaN stats ───────────────────────────────────────
+            all_flags       = torch.cat(corrupt_img_flags)          # (N,) bool
+            corrupt_img_pct = all_flags.float().mean().item() * 100
+
+            if corrupt_px_sums:
+                corrupt_px_pct = torch.cat(corrupt_px_sums).mean().item() * 100
+            else:
+                corrupt_px_pct = 0.0
+
+            if first_appearance_list:
+                avg_first_appearance = torch.cat(first_appearance_list).mean().item()
+            else:
+                avg_first_appearance = total_steps
 
             metrics_results = {"w1": w1_evaluator.compute(gen_true)}
             fill_metrics_results(metrics_evo, metrics_results)
@@ -256,7 +300,7 @@ try:
                 dataset=dataset,
                 device=DEVICE,
                 n_samples=8,
-                n_steps=config.corruption.corruptor_params.n_steps
+                n_steps=n_steps_eval,
             )
 
             model.train()
@@ -271,21 +315,9 @@ try:
 
             log_wandb_metrics(metrics_evo)
 
-            # NaN/Inf diagnostics
-            n_images = gen_norm.shape[0]
-            nan_or_inf_mask = torch.isnan(gen_norm) | torch.isinf(gen_norm)
-            per_image_mask = nan_or_inf_mask.view(n_images, -1)  # [N, C*H*W]
-
-            # % of images containing at least one bad pixel
-            corrupt_img_pct = per_image_mask.any(dim=1).float().mean().item() * 100
-
-            # % of pixels that are bad, averaged only over corrupted images
-            corrupted_images = per_image_mask[per_image_mask.any(dim=1)]
-            corrupt_px_pct = corrupted_images.float().mean().item() * 100 if corrupted_images.shape[0] > 0 else 0.0
-
             external_dict = {
                 "corrupt_img%": corrupt_img_pct,
-                "corrupt_px%": corrupt_px_pct,
+                "corrupt_px%":  corrupt_px_pct,
                 "first_corrupt_step": avg_first_appearance,
             }
             wandb.log(external_dict)

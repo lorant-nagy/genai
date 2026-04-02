@@ -188,10 +188,13 @@ try:
     backward_cntr = 0
     loss_sum_interval = 0.0
     log_backward_freq = max(1, len(dataloader) // config.eval.evals_per_epoch)
+    eval_from = getattr(config.eval, "eval_from", 1)
+    epoch_true = 0
     print(f"[bold blue]Evals per epoch:[/] [yellow]{config.eval.evals_per_epoch}[/] → log_backward_freq: {log_backward_freq}")
+    print(f"[bold blue]Eval from epoch:[/] [yellow]{eval_from}[/]")
     # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
     for epoch in range(config.train.n_epochs):
-
+        epoch_true += 1
         for c, batch in enumerate(dataloader):
             backward_cntr += 1
             batch = batch.to(DEVICE)
@@ -217,6 +220,20 @@ try:
 
             metrics_evo['epochs'].append(backward_cntr)
             metrics_evo['loss'].append(avg_loss)
+
+            if epoch_true < eval_from:
+                # warmup: skip expensive eval, keep list lengths in sync
+                metrics_evo['w1'].append(None)
+                metrics_evo['nan'].append("")
+                external_dict = {
+                    "corrupt_img%":      None,
+                    "corrupt_px%":       None,
+                    "first_corrupt_step": None,
+                }
+                log_wandb_metrics(metrics_evo)
+                line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
+                print(line)
+                continue
 
             model.eval()
             CHW = (dataset.C, dataset.H, dataset.W)
@@ -288,6 +305,13 @@ try:
             else:
                 avg_first_appearance = total_steps
 
+            external_dict = {
+                "corrupt_img%": corrupt_img_pct,
+                "corrupt_px%":  corrupt_px_pct,
+                "first_corrupt_step": avg_first_appearance,
+            }
+            wandb.log(external_dict)
+
             metrics_results = {"w1": w1_evaluator.compute(gen_true)}
             fill_metrics_results(metrics_evo, metrics_results)
 
@@ -314,13 +338,6 @@ try:
                     maybe_update_best(metric, metrics_evo[metric][-1], backward_cntr, best_models, model)
 
             log_wandb_metrics(metrics_evo)
-
-            external_dict = {
-                "corrupt_img%": corrupt_img_pct,
-                "corrupt_px%":  corrupt_px_pct,
-                "first_corrupt_step": avg_first_appearance,
-            }
-            wandb.log(external_dict)
 
             line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
             print(line)

@@ -198,10 +198,17 @@ def generate_samples_matplotlib(
 
 def log_wandb_metrics(metrics_evo: dict):
     temp_dict = {}
-    for key in metrics_evo.keys():
-        if metrics_evo[key]:
-            temp_dict[key] = metrics_evo[key][-1]
-    wandb.log(temp_dict)
+    for key, values in metrics_evo.items():
+        if not values:
+            continue
+        v = values[-1]
+        if v is None or v == "":
+            continue
+        if isinstance(v, (float, np.floating)) and not np.isfinite(v):
+            continue
+        temp_dict[key] = v
+    if temp_dict:
+        wandb.log(temp_dict)
 
 def create_header(metrics_evo: dict, width = None, external = None) -> str:
     header = "  " + "".join(f"{k:<{width}}" for k in metrics_evo.keys())
@@ -217,30 +224,22 @@ def log_wandb_best(best_models: dict, config):
         wandb.summary[f"best_{key}_epoch"] = int(info["epoch"])
 
 
-def build_line(metrics_evo: dict, width = None, external_dict = None) -> str:
-    cells = []
-    for k in metrics_evo.keys():
-        v_list = metrics_evo[k]
-        v = v_list[-1] if v_list else "-"
-
+def build_line(metrics_evo: dict, width=None, external_dict=None) -> str:
+    def fmt(v):
+        if v is None or v == "":
+            return f"{'-':<{width}}"
         if isinstance(v, (float, np.floating)):
-            cells.append(f"{v:<{width}.7f}")
-        elif isinstance(v, int):
-            cells.append(f"{v:<{width}d}")
-        else:
-            cells.append(f"{str(v):<{width}}")
-    
-    # Add external values
+            if not np.isfinite(v):
+                return f"{'-':<{width}}"
+            return f"{v:<{width}.7f}"
+        if isinstance(v, int):
+            return f"{v:<{width}d}"
+        return f"{str(v):<{width}}"
+
+    cells = [fmt(v_list[-1] if v_list else None) for v_list in metrics_evo.values()]
+
     if external_dict:
-        for k, v in external_dict.items():
-            if v is None:
-                cells.append(f"{'-':<{width}}")
-            elif isinstance(v, (float, np.floating)):
-                cells.append(f"{v:<{width}.7f}")
-            elif isinstance(v, int):
-                cells.append(f"{v:<{width}d}")
-            else:
-                cells.append(f"{str(v):<{width}}")
+        cells += [fmt(v) for v in external_dict.values()]
 
     return "  " + "".join(cells)
 
@@ -356,25 +355,6 @@ def fill_metrics_results(metrics_evo, metrics_results):
             metrics_evo[key].append(value)
     has_bad = any(not np.isfinite(v) for v in metrics_results.values())
     metrics_evo["nan"].append("NaN" if has_bad else "")
-
-# def save_metrics_evo(metrics_evo: dict, run_dir: str, filename: str = "metrics_evo.json"):
-
-#     filepath = os.path.join(run_dir, filename)
-    
-#     # Convert numpy types to native Python types
-#     metrics_clean = {}
-#     for key, values in metrics_evo.items():
-#         metrics_clean[key] = [
-#             float(v) if isinstance(v, (np.floating, np.integer)) 
-#             else int(v) if isinstance(v, (np.int_, np.intc, np.intp))
-#             else v
-#             for v in values
-#         ]
-    
-#     with open(filepath, "w") as f:
-#         json.dump(metrics_clean, f, indent=2)
-    
-#     return filepath
 
 def dump_dict_to_json(data_dict: dict, dir: str, filename: str = "data_dict.json"):
     filepath = os.path.join(dir, filename)

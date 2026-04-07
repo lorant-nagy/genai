@@ -356,6 +356,26 @@ def fill_metrics_results(metrics_evo, metrics_results):
     has_bad = any(not np.isfinite(v) for v in metrics_results.values())
     metrics_evo["nan"].append("NaN" if has_bad else "")
 
+def filter_corrupt_images(images: torch.Tensor, threshold: float = 0.10):
+    """
+    Drop images where the fraction of NaN/Inf pixels exceeds `threshold`.
+
+    Args:
+        images:    (N, C, H, W) float tensor
+        threshold: pixel-bad fraction above which the image is discarded (default 0.10 = 10%)
+
+    Returns:
+        clean:     (M, C, H, W) tensor with corrupt images removed  (M <= N)
+        trash_pct: float, percentage of images that were discarded (0-100)
+    """
+    N = images.shape[0]
+    bad_mask  = torch.isnan(images) | torch.isinf(images)          # (N, C, H, W)
+    bad_frac  = bad_mask.view(N, -1).float().mean(dim=1)           # (N,)
+    keep_mask = bad_frac <= threshold                               # (N,) bool
+    clean     = images[keep_mask]
+    trash_pct = (1.0 - keep_mask.float().mean().item()) * 100.0
+    return clean, trash_pct
+
 def dump_dict_to_json(data_dict: dict, dir: str, filename: str = "data_dict.json"):
     filepath = os.path.join(dir, filename)
     

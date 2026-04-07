@@ -24,6 +24,7 @@ from utils.helpers import (
     wandb_log_best_and_plot,
     log_wandb_best,
     fill_metrics_results,
+    filter_corrupt_images,
     dump_dict_to_json,
     generate_samples_matplotlib,
     load_cfg
@@ -178,7 +179,7 @@ try:
     w1_evaluator = W1Evaluator(real_true)
 
     best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
-    metrics_evo = {key: [] for key in ['epochs', 'loss', 'nan', 'w1']}
+    metrics_evo = {key: [] for key in ['epochs', 'loss', 'nan', 'w1', 'trash%']}
 
     print_tab_w = 16
     header = create_header(metrics_evo, print_tab_w, external = ["corrupt_img%", "corrupt_px%", "first_corrupt_step"])
@@ -225,6 +226,7 @@ try:
                 # warmup: skip expensive eval, keep list lengths in sync
                 metrics_evo['w1'].append(None)
                 metrics_evo['nan'].append("")
+                metrics_evo['trash%'].append(None)
                 external_dict = {
                     "corrupt_img%":      None,
                     "corrupt_px%":       None,
@@ -291,6 +293,10 @@ try:
             gen_norm  = torch.cat(gen_norm_chunks, dim=0)           # (N, C, H, W)
             gen_true  = normalizer.denormalize(gen_norm).clamp(0, 1)
 
+            # ── Filter corrupt images before metric computation ───────────
+            gen_true_clean, trash_pct = filter_corrupt_images(gen_true, threshold=0.10)
+            metrics_evo['trash%'].append(trash_pct)
+
             # ── Aggregate NaN stats ───────────────────────────────────────
             all_flags       = torch.cat(corrupt_img_flags)          # (N,) bool
             corrupt_img_pct = all_flags.float().mean().item() * 100
@@ -312,7 +318,7 @@ try:
             }
             wandb.log(external_dict)
 
-            metrics_results = {"w1": w1_evaluator.compute(gen_true)}
+            metrics_results = {"w1": w1_evaluator.compute(gen_true_clean)}
             fill_metrics_results(metrics_evo, metrics_results)
 
             sample_grid_matplotlib = generate_samples_matplotlib(

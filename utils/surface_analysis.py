@@ -1,449 +1,526 @@
 #!/usr/bin/env python3
 """
-Docker Sweep Runner - runs each config in a fresh container
+Surface Analysis Script
+=======================
+Analyses a 3-axis sweep: T × alpha × n_steps, producing four families of plots
+per metric and uploading them all to WandB.
 
-Usage:
-    # Normal sweep
-    python3 utils/docker_sweep.py config_folder/ --device 2
+Requires a *rectangular* sweep — every combination of the observed T, alpha,
+and n_steps values must have exactly one completed run.  Missing cells are
+reported and the script exits rather than silently producing partial plots.
 
-    # Retry from a failed_configs.txt written by a previous sweep
-    python3 utils/docker_sweep.py config_folder/ --device 2 \\
-        --retry-failed /path/to/runs/my_project/failed_configs_20260310_141549.txt
+Plots produced (per metric)
+---------------------------
+1. Heatmaps       — T (x) × alpha (y), one panel per n_steps + one sup panel
+2. Curves vs T    — one curve per alpha, faceted by n_steps
+3. Curves vs n_steps — one curve per (T, alpha) pair, all on one axes
+4. Sensitivity    — variance bar chart: how much does each axis matter?
 
-Each container is pinned to the requested physical GPU via CUDA_VISIBLE_DEVICES,
-which remaps it to cuda:0 inside the container so train.py always uses --device 0.
+Usage (direct):
+    python -m utils.surface_analysis <runs_folder> <project_name>
 
-Code snapshot
--------------
-At sweep start the repo is copied to <log_dir>/snapshot/ so that branch switches
-or edits on the host during a long sweep do not affect running containers.
-Pass --no-snapshot to disable and use the live workspace.
+Usage (via analyse.py):
+    python -m utils.analyse <runs_folder> <project_name> --surface
 """
 
-import argparse
-import subprocess
-import shutil
+import json
 import sys
-import os
-from pathlib import Path
-from datetime import datetime, timedelta
 import yaml
-import time
+from collections import defaultdict
+from datetime import datetime
+from itertools import product
+from pathlib import Path
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-
-# ── Config discovery ──────────────────────────────────────────────────────────
-
-def find_configs(config_dir):
-    """Find all .yml files in directory."""
-    config_dir = Path(config_dir)
-    return sorted([f for f in config_dir.glob("*.yml") if f.name != "manifest.yml"])
-
-
-def filter_configs_by_names(all_configs, names):
-    """Return only configs whose filename is in the given set of names."""
-    return [c for c in all_configs if c.name in names]
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.patheffects
+import numpy as np
+import wandb
 
 
-# ── Failed-list helpers ───────────────────────────────────────────────────────
+# ── Palette ───────────────────────────────────────────────────────────────────
 
-def write_failed_list(failed_names, log_file_path):
+PALETTE = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D", "#6A4C93",
+           "#1982C4", "#8AC926", "#FF595E", "#6A994E", "#FF6B6B"]
+MARKERS = ["o", "s", "^", "D", "v", "P", "X", "h", "*", "p"]
+
+def _c(i): return PALETTE[i % len(PALETTE)]
+def _m(i): return MARKERS[i % len(MARKERS)]
+
+
+# ── Inf axis ──────────────────────────────────────────────────────────────────
+# The axis to take the infimum over in plot_heatmaps.
+# The other two axes become the x and y axes of each heatmap panel.
+# Options: "T", "alpha", "n_steps"
+
+INF_AXIS = "n_steps"
+
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+
+def load_run_data(runs_dir: Path) -> list[dict]:
     """
-    Write a failed_configs_<timestamp>.txt next to the global log.
-    Returns the path written, or None if there were no failures.
+    Load all completed runs from runs_dir.
+    Each entry: {T, alpha, n_steps, best_metrics, run_name}
+    best_metrics: median of last 5 finite values per metric key.
     """
-    if not failed_names:
-        return None
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    failed_list_path = log_file_path.parent / f"failed_configs_{timestamp}.txt"
-    with open(failed_list_path, "w") as f:
-        for name in sorted(failed_names):
-            f.write(name + "\n")
-    return failed_list_path
+    all_data = []
+
+    for run_dir in sorted(runs_dir.iterdir()):
+        if not run_dir.is_dir():
+            continue
+
+        config_path  = run_dir / "config.yaml"
+        metrics_path = run_dir / "metrics_evo.json"
+
+        if not config_path.exists() or not metrics_path.exists():
+            continue
+
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        with open(metrics_path) as f:
+            metrics_evo = json.load(f)
+
+        T       = cfg["corruption"]["process_params"]["T"]
+        alpha   = cfg["corruption"]["process_params"]["alpha"]
+        n_steps = cfg["corruption"]["corruptor_params"]["n_steps"]
+
+        best_metrics = {}
+        for key, values in metrics_evo.items():
+            if key in ("epochs", "nan") or not values:
+                continue
+            finite = [v for v in values
+                      if isinstance(v, (int, float)) and np.isfinite(v)]
+            if finite:
+                best_metrics[key] = float(np.median(finite[-5:]))
+
+        all_data.append({
+            "T":            T,
+            "alpha":        alpha,
+            "n_steps":      n_steps,
+            "best_metrics": best_metrics,
+            "run_name":     run_dir.name,
+        })
+
+    return all_data
 
 
-def read_failed_list(path):
-    """Read a failed_configs_*.txt and return a set of config filenames."""
-    path = Path(path)
-    names = set()
-    with open(path, "r") as f:
-        for line in f:
-            name = line.strip()
-            if name:
-                names.add(name)
-    return names
+# ── Rectangularity check & largest usable sub-grid ───────────────────────────
+
+def _is_rectangular(data: list[dict]) -> tuple[bool, set]:
+    """Return (is_rect, missing_set) for the given data."""
+    T_vals      = sorted({d["T"]       for d in data})
+    alpha_vals  = sorted({d["alpha"]   for d in data})
+    nsteps_vals = sorted({d["n_steps"] for d in data})
+    present     = {(d["T"], d["alpha"], d["n_steps"]) for d in data}
+    full_grid   = set(product(T_vals, alpha_vals, nsteps_vals))
+    missing     = full_grid - present
+    return len(missing) == 0, missing
 
 
-# ── Log path inference ────────────────────────────────────────────────────────
-
-def infer_log_path(config_dir, retry=False):
-    """Infer log file path from the first config file."""
-    configs = find_configs(config_dir)
-    if not configs:
-        return None
-    with open(configs[0], "r") as f:
-        config = yaml.safe_load(f)
-    wandb_project = config.get("wandb", {}).get("project", "default_project")
-    project_dir   = os.path.join("/data/lorantnagy/storage/genai/runs", wandb_project)
-    timestamp     = datetime.now().strftime("%Y%m%d_%H%M%S")
-    suffix        = "_retry" if retry else ""
-    return os.path.join(project_dir, f"global_logs_{timestamp}{suffix}.txt")
-
-
-# ── Code snapshot ─────────────────────────────────────────────────────────────
-
-def get_git_info(repo_root):
-    """Return (commit_hash, branch) or ('unknown', 'unknown') on failure."""
-    def _git(*args):
-        try:
-            return subprocess.check_output(
-                ["git", "-C", str(repo_root)] + list(args),
-                stderr=subprocess.DEVNULL,
-            ).decode().strip()
-        except Exception:
-            return "unknown"
-    return _git("rev-parse", "--short", "HEAD"), _git("rev-parse", "--abbrev-ref", "HEAD")
-
-
-def snapshot_repo(repo_root, dest_dir):
+def find_largest_rectangular(all_data: list[dict]):
     """
-    Copy the repo into dest_dir/snapshot/, respecting .dockerignore patterns.
-    Returns the Path to the snapshot directory.
+    Find the largest rectangular T × alpha × n_steps sub-grid present in the
+    data.  Strategy: the INF_AXIS is most likely to be partially complete
+    (runs still in progress), so we try dropping its largest values until the
+    remaining data is rectangular.
+
+    Returns (filtered_data, T_vals, alpha_vals, nsteps_vals, dropped).
+    Raises AssertionError on duplicate triples (that is always a hard error).
     """
-    repo_root = Path(repo_root).resolve()
-    snapshot  = Path(dest_dir) / "snapshot"
-    snapshot.mkdir(parents=True, exist_ok=True)
+    # Duplicate check — always hard error
+    tuples = [(d["T"], d["alpha"], d["n_steps"]) for d in all_data]
+    seen, dupes = set(), []
+    for t in tuples:
+        if t in seen:
+            dupes.append(t)
+        seen.add(t)
+    assert not dupes, f"Duplicate (T, alpha, n_steps) triples: {dupes}"
 
-    SKIP_DIRS = {".git", "__pycache__", "wandb", "runs", "checkpoints",
-                 "data", "outputs", ".venv", ".ipynb_checkpoints", ".vscode"}
-    SKIP_EXTS = {".pyc", ".pyo", ".pyd", ".pt", ".pth", ".ckpt",
-                 ".npy", ".npz", ".DS_Store"}
+    all_inf_vals = sorted({d[INF_AXIS] for d in all_data})
 
-    def _ignore(src, names):
-        ignored = set()
-        for name in names:
-            if name in SKIP_DIRS:
-                ignored.add(name)
-            elif Path(name).suffix in SKIP_EXTS:
-                ignored.add(name)
-        return ignored
+    # Try progressively dropping the largest INF_AXIS values
+    for n_drop in range(len(all_inf_vals)):
+        candidate_inf = all_inf_vals[: len(all_inf_vals) - n_drop]
+        candidate_data = [d for d in all_data if d[INF_AXIS] in candidate_inf]
+        ok, _          = _is_rectangular(candidate_data)
+        if ok:
+            dropped     = all_inf_vals[len(all_inf_vals) - n_drop :]
+            T_vals      = sorted({d["T"]       for d in candidate_data})
+            alpha_vals  = sorted({d["alpha"]   for d in candidate_data})
+            nsteps_vals = sorted({d["n_steps"] for d in candidate_data})
+            return candidate_data, T_vals, alpha_vals, nsteps_vals, dropped
 
-    shutil.copytree(repo_root, snapshot, ignore=_ignore, dirs_exist_ok=True)
-    return snapshot
-
-
-# ── Formatting helpers ────────────────────────────────────────────────────────
-
-def format_timedelta(td):
-    total_seconds = int(td.total_seconds())
-    h = total_seconds // 3600
-    m = (total_seconds % 3600) // 60
-    s = total_seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-
-def format_eta_info(completed, total, avg_time_per_config, elapsed_time):
-    if completed == 0:
-        return "ETA: Calculating..."
-    remaining           = total - completed
-    estimated_remaining = avg_time_per_config * remaining
-    eta_time            = datetime.now() + estimated_remaining
-    return (
-        f"Progress: {completed}/{total} | "
-        f"Avg time/config: {format_timedelta(avg_time_per_config)} | "
-        f"Elapsed: {format_timedelta(elapsed_time)} | "
-        f"ETA: {eta_time.strftime('%Y-%m-%d %H:%M:%S')} "
-        f"(~{format_timedelta(estimated_remaining)} remaining)"
+    raise AssertionError(
+        f"Could not find any rectangular sub-grid even after dropping all "
+        f"{INF_AXIS} values. Check your data."
     )
 
 
-def _parse_device_index(device):
-    if device is None:
-        return None
-    s = str(device).strip()
-    if s.lower().startswith("cuda:"):
-        return s.split(":")[-1]
-    return s
-
-
-# ── Difficulty ordering ───────────────────────────────────────────────────────
-
-# Set to True to run hardest configs first (large T, large alpha, large n_steps).
-# Set to False to restore random ordering.
-SORT_BY_DIFFICULTY = True
-
-def _difficulty_key(config_path: Path) -> tuple:
+def check_rectangular(all_data: list[dict]):
     """
-    Parse T, alpha, n_steps from the config filename and return a difficulty
-    tuple (descending: largest values = hardest = run first).
-    Falls back to 0 for any axis not found in the filename.
-
-    Filename format produced by config_factory.py, e.g.:
-        T_8p0__alpha_2p5__n_steps_1000.yml
+    Find and report the largest usable rectangular sub-grid.
+    Prints a summary and returns (T_vals, alpha_vals, nsteps_vals).
+    Also returns filtered_data as a 4th element.
     """
-    name = config_path.stem   # strip .yml
+    filtered, T_vals, alpha_vals, nsteps_vals, dropped = \
+        find_largest_rectangular(all_data)
 
-    def _extract(tag: str) -> float:
-        # match  <tag>_<number>  where number may use 'p' as decimal point
-        import re
-        m = re.search(rf"(?:^|__)(?:{tag})_([0-9]+(?:p[0-9]+)?)", name)
-        if m:
-            return float(m.group(1).replace("p", "."))
-        return 0.0
+    total_present = len(all_data)
+    total_used    = len(filtered)
+    full_cells    = len(T_vals) * len(alpha_vals) * len(nsteps_vals)
 
-    T       = _extract("T")
-    alpha   = _extract("alpha")
-    n_steps = _extract("n_steps")
+    print()
+    print("=" * 60)
+    print("  TABLE SUMMARY")
+    print("=" * 60)
+    print(f"  Runs found          : {total_present}")
+    print(f"  Runs used           : {total_used}")
+    if dropped:
+        print(f"  {INF_AXIS} dropped     : {dropped}  (incomplete)")
+    else:
+        print(f"  {INF_AXIS} dropped     : none  (full grid available)")
+    print(f"  Grid shape          : "
+          f"{len(T_vals)} T × {len(alpha_vals)} alpha × {len(nsteps_vals)} n_steps"
+          f" = {full_cells} cells")
+    print(f"  T values            : {T_vals}")
+    print(f"  alpha values        : {alpha_vals}")
+    print(f"  n_steps values      : {nsteps_vals}")
+    print("=" * 60)
+    print()
 
-    # Return negated so that sorted() puts the hardest (largest) first
-    return (-T, -alpha, -n_steps)
+    return filtered, T_vals, alpha_vals, nsteps_vals
 
 
-def sort_configs_by_difficulty(configs: list) -> list:
-    if not SORT_BY_DIFFICULTY:
-        import random
-        random.shuffle(configs)
-        return configs
-    return sorted(configs, key=_difficulty_key)
+# ── Build lookup table ────────────────────────────────────────────────────────
+
+def build_table(all_data: list[dict]) -> dict:
+    """Return dict (T, alpha, n_steps) -> best_metrics."""
+    return {(d["T"], d["alpha"], d["n_steps"]): d["best_metrics"]
+            for d in all_data}
 
 
+# ── Plot 1: Heatmaps, faceted by INF_AXIS + sup panel ────────────────────────
 
-def run_config_in_docker(config_path, device, compose_file, snapshot_dir):
+def plot_heatmaps(metric: str, table: dict,
+                  T_vals, alpha_vals, nsteps_vals):
     """
-    Run training in a fresh Docker container.
-    If snapshot_dir is set, overrides the workspace volume with the snapshot.
+    One row of panels: one heatmap per value of INF_AXIS + one sup panel.
+    The two remaining axes become x and y of each heatmap.
+    Cell colour = metric value; sup panel = inf over INF_AXIS.
     """
-    device_idx = _parse_device_index(device)
+    # Derive x/y/panel axes from INF_AXIS
+    axis_vals = {"T": T_vals, "alpha": alpha_vals, "n_steps": nsteps_vals}
+    all_axes  = ["T", "alpha", "n_steps"]
+    heatmap_axes = [a for a in all_axes if a != INF_AXIS]   # [x_axis, y_axis]
+    x_name, y_name = heatmap_axes
+    x_vals  = axis_vals[x_name]
+    y_vals  = axis_vals[y_name]
+    inf_vals = axis_vals[INF_AXIS]
 
-    cmd = ["docker", "compose", "-f", compose_file, "run", "--rm"]
+    def lookup(x, y, inf_v):
+        key = {x_name: x, y_name: y, INF_AXIS: inf_v}
+        return table.get((key["T"], key["alpha"], key["n_steps"]), {}).get(metric, np.nan)
 
-    if device_idx is not None:
-        cmd += ["-e", f"CUDA_VISIBLE_DEVICES={device_idx}"]
+    n_panels = len(inf_vals) + 1          # +1 for sup
+    fig, axes = plt.subplots(
+        1, n_panels,
+        figsize=(4.0 * n_panels, 4.0),
+        squeeze=False,
+    )
+    axes = axes[0]
 
-    if snapshot_dir is not None:
-        cmd += ["-v", f"{snapshot_dir}:/workspace"]
+    # Build one grid per inf_val — shape: (len(y_vals), len(x_vals))
+    grids = {}
+    for iv in inf_vals:
+        grid = np.full((len(y_vals), len(x_vals)), np.nan)
+        for yi, y in enumerate(y_vals):
+            for xi, x in enumerate(x_vals):
+                grid[yi, xi] = lookup(x, y, iv)
+        grids[iv] = grid
 
-    cmd += ["train", "python", "-m", "ml.train", str(config_path), "--device", "0"]
+    # Sup grid: inf over inf_vals (lower = better)
+    sup_grid = np.full((len(y_vals), len(x_vals)), np.nan)
+    for yi in range(len(y_vals)):
+        for xi in range(len(x_vals)):
+            vals = [grids[iv][yi, xi] for iv in inf_vals
+                    if np.isfinite(grids[iv][yi, xi])]
+            if vals:
+                sup_grid[yi, xi] = min(vals)
 
-    print(f"\n{'='*80}")
-    print(f"Running : {config_path.name}")
-    if device_idx is not None:
-        print(f"GPU     : physical device {device_idx}  ->  cuda:0 inside container")
-    if snapshot_dir is not None:
-        print(f"Code    : {snapshot_dir}  (snapshot)")
-    print(f"Command : {' '.join(cmd)}")
-    print(f"{'='*80}\n")
+    all_vals    = np.concatenate([g.ravel() for g in list(grids.values()) + [sup_grid]])
+    finite_vals = all_vals[np.isfinite(all_vals)]
+    vmin, vmax  = (float(finite_vals.min()), float(finite_vals.max())) \
+        if len(finite_vals) else (0, 1)
 
-    config_start = time.time()
-    result       = subprocess.run(cmd)
-    duration     = time.time() - config_start
+    cmap = plt.cm.viridis_r    # lower = better = brighter
 
-    return result.returncode, duration
+    for idx, iv in enumerate(inf_vals):
+        ax = axes[idx]
+        im = ax.imshow(
+            grids[iv], cmap=cmap, vmin=vmin, vmax=vmax,
+            aspect="auto", origin="lower",
+        )
+        _annotate_heatmap(ax, grids[iv])
+        ax.set_xticks(range(len(x_vals)))
+        ax.set_xticklabels([str(v) for v in x_vals], rotation=45, ha="right")
+        ax.set_yticks(range(len(y_vals)))
+        ax.set_yticklabels([str(v) for v in y_vals])
+        ax.set_xlabel(x_name)
+        if idx == 0:
+            ax.set_ylabel(y_name)
+        ax.set_title(f"{INF_AXIS}={iv}", fontsize=10)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    # Sup panel
+    ax = axes[-1]
+    im = ax.imshow(
+        sup_grid, cmap=cmap, vmin=vmin, vmax=vmax,
+        aspect="auto", origin="lower",
+    )
+    _annotate_heatmap(ax, sup_grid)
+    ax.set_xticks(range(len(x_vals)))
+    ax.set_xticklabels([str(v) for v in x_vals], rotation=45, ha="right")
+    ax.set_yticks(range(len(y_vals)))
+    ax.set_yticklabels([str(v) for v in y_vals])
+    ax.set_xlabel(x_name)
+    ax.set_title(f"inf over {INF_AXIS}", fontsize=10, fontweight="bold")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    fig.suptitle(f"{metric.upper()}  —  {y_name} × {x_name} heatmaps",
+                 fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    wandb.log({f"{metric}/heatmap_{x_name}_{y_name}": wandb.Image(fig)})
+    plt.close(fig)
+
+
+def _annotate_heatmap(ax, grid):
+    """Print numeric values inside each cell."""
+    for ai in range(grid.shape[0]):
+        for ti in range(grid.shape[1]):
+            v = grid[ai, ti]
+            if np.isfinite(v):
+                ax.text(ti, ai, f"{v:.4f}",
+                        ha="center", va="center",
+                        fontsize=7, color="white",
+                        path_effects=[
+                            matplotlib.patheffects.withStroke(
+                                linewidth=1.5, foreground="black")
+                        ])
+
+
+# ── Plot 2: metric vs T, faceted by n_steps ───────────────────────────────────
+
+def plot_metric_vs_T(metric: str, table: dict,
+                     T_vals, alpha_vals, nsteps_vals):
+    """
+    One column per n_steps.  Within each panel: x=T, one curve per alpha.
+    """
+    n_panels = len(nsteps_vals)
+    fig, axes = plt.subplots(
+        1, n_panels,
+        figsize=(4.5 * n_panels, 4.5),
+        sharey=True, squeeze=False,
+    )
+    axes = axes[0]
+
+    for idx, n in enumerate(nsteps_vals):
+        ax = axes[idx]
+        for ai, a in enumerate(alpha_vals):
+            ys = [table.get((t, a, n), {}).get(metric, np.nan)
+                  for t in T_vals]
+            ax.plot(T_vals, ys,
+                    color=_c(ai), marker=_m(ai),
+                    markersize=7, linewidth=1.8,
+                    label=f"α={a}")
+        ax.set_xlabel("T", fontsize=11)
+        if idx == 0:
+            ax.set_ylabel(metric.upper(), fontsize=11)
+        ax.set_title(f"n_steps={n}", fontsize=10)
+        ax.grid(True, alpha=0.25)
+        if idx == n_panels - 1:
+            ax.legend(fontsize=9, loc="best")
+
+    fig.suptitle(f"{metric.upper()}  —  vs T  (faceted by n_steps)",
+                 fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    wandb.log({f"{metric}/vs_T_by_nsteps": wandb.Image(fig)})
+    plt.close(fig)
+
+
+# ── Plot 3: metric vs n_steps, all (T, alpha) curves ─────────────────────────
+
+def plot_metric_vs_nsteps(metric: str, table: dict,
+                          T_vals, alpha_vals, nsteps_vals):
+    """
+    x = n_steps.  One curve per (T, alpha) pair.
+    Linestyle encodes T, colour encodes alpha.
+    """
+    linestyles = ["-", "--", "-.", ":"]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for ti, t in enumerate(T_vals):
+        ls = linestyles[ti % len(linestyles)]
+        for ai, a in enumerate(alpha_vals):
+            ys = [table.get((t, a, n), {}).get(metric, np.nan)
+                  for n in nsteps_vals]
+            label = f"T={t}, α={a}"
+            ax.plot(nsteps_vals, ys,
+                    color=_c(ai), marker=_m(ti),
+                    linestyle=ls,
+                    markersize=7, linewidth=1.6,
+                    label=label)
+
+    ax.set_xlabel("n_steps", fontsize=12)
+    ax.set_ylabel(metric.upper(), fontsize=12)
+    ax.set_title(f"{metric.upper()}  —  vs n_steps  (all T × alpha)",
+                 fontsize=13, fontweight="bold")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8, ncol=2, loc="best")
+    plt.tight_layout()
+    wandb.log({f"{metric}/vs_nsteps_all": wandb.Image(fig)})
+    plt.close(fig)
+
+
+# ── Plot 4: sensitivity bar chart ─────────────────────────────────────────────
+
+def plot_sensitivity(all_metrics: list[str], table: dict,
+                     T_vals, alpha_vals, nsteps_vals):
+    """
+    For each metric: variance when marginalising over each axis independently.
+    Produces one grouped bar chart covering all metrics.
+    """
+    axes_labels = ["T", "alpha", "n_steps"]
+    axes_sets   = [T_vals, alpha_vals, nsteps_vals]
+
+    variances = {m: [] for m in all_metrics}
+
+    for metric in all_metrics:
+        for axis_idx, fixed_vals in enumerate(
+                [alpha_vals, nsteps_vals, T_vals]):       # the OTHER two axes
+            # marginalise: for each value of the free axis, average over the fixed two
+            free_axis    = axes_sets[axis_idx]
+            other_axes   = [axes_sets[i] for i in range(3) if i != axis_idx]
+
+            per_free = []
+            for free_val in free_axis:
+                vals = []
+                for combo in product(*other_axes):
+                    key_parts = [None, None, None]
+                    key_parts[axis_idx] = free_val
+                    oi = 0
+                    for i in range(3):
+                        if i != axis_idx:
+                            key_parts[i] = combo[oi]
+                            oi += 1
+                    v = table.get(tuple(key_parts), {}).get(metric, np.nan)
+                    if np.isfinite(v):
+                        vals.append(v)
+                if vals:
+                    per_free.append(float(np.mean(vals)))
+
+            variances[metric].append(float(np.var(per_free)) if per_free else 0.0)
+
+    # Normalise within each metric so bars are comparable
+    n_metrics = len(all_metrics)
+    fig, ax = plt.subplots(figsize=(max(8, n_metrics * 1.4), 5))
+
+    x      = np.arange(n_metrics)
+    width  = 0.25
+    colors = ["#2E86AB", "#A23B72", "#F18F01"]
+
+    for i, axis_label in enumerate(axes_labels):
+        vals = []
+        for metric in all_metrics:
+            row = variances[metric]
+            total = sum(row) if sum(row) > 0 else 1.0
+            vals.append(row[i] / total)       # normalised share
+        ax.bar(x + i * width, vals,
+               width, label=axis_label, color=colors[i], alpha=0.85)
+
+    ax.set_xticks(x + width)
+    ax.set_xticklabels(all_metrics, rotation=35, ha="right", fontsize=9)
+    ax.set_ylabel("Normalised variance share", fontsize=11)
+    ax.set_title("Sensitivity: which axis drives each metric?",
+                 fontsize=13, fontweight="bold")
+    ax.legend(fontsize=11)
+    ax.grid(True, axis="y", alpha=0.25)
+    plt.tight_layout()
+    wandb.log({"sensitivity_by_axis": wandb.Image(fig)})
+    plt.close(fig)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run all configs in separate Docker containers"
-    )
-    parser.add_argument("config_dir",
-                        help="Directory containing config .yml files")
-    parser.add_argument("--log-file",      default=None,
-                        help="Path to log file (auto-inferred if not provided)")
-    parser.add_argument("--device",        default=None,
-                        help="Physical GPU index (e.g. 0, 1, 2)")
-    parser.add_argument("--compose-file",  default="compose.yml")
-    parser.add_argument("--retry-failed",  default=None, metavar="FAILED_LIST",
-                        help="Path to a failed_configs_*.txt from a previous sweep. "
-                             "Only those configs will be run. "
-                             "A new global log is created with a _retry suffix.")
-    parser.add_argument("--snapshot",      default=None, metavar="SNAPSHOT_DIR",
-                        help="Reuse an existing snapshot directory instead of creating a new one. "
-                             "Useful with --retry-failed to run with the exact same code as the original sweep.")
-    parser.add_argument("--no-snapshot",   action="store_true",
-                        help="Skip code snapshot and use the live workspace.")
-    args = parser.parse_args()
-
-    repo_root = Path(__file__).resolve().parent.parent
-
-    # ── Collect configs ───────────────────────────────────────────────────────
-    all_configs = find_configs(args.config_dir)
-    if not all_configs:
-        print(f"No config files found in: {args.config_dir}")
+    if len(sys.argv) != 3:
+        print("Usage: python -m utils.surface_analysis <runs_folder> <project_name>")
         sys.exit(1)
 
-    # ── Filter to failed list if retrying ─────────────────────────────────────
-    is_retry = args.retry_failed is not None
-    if is_retry:
-        failed_list_path = Path(args.retry_failed)
-        if not failed_list_path.exists():
-            print(f"Failed list not found: {failed_list_path}")
-            sys.exit(1)
-        failed_names = read_failed_list(failed_list_path)
-        configs      = filter_configs_by_names(all_configs, failed_names)
+    runs_folder  = sys.argv[1]
+    project_name = sys.argv[2]
+    runs_dir     = Path(runs_folder)
 
-        missing = failed_names - {c.name for c in configs}
-        print(f"\nRetry mode  —  failed list: {failed_list_path}")
-        print(f"  configs in list : {len(failed_names)}")
-        print(f"  found in dir    : {len(configs)}")
-        if missing:
-            print(f"  not found ({len(missing)}) :")
-            for m in sorted(missing):
-                print(f"    - {m}")
-        if not configs:
-            print("\nNo matching configs found. Exiting.")
-            sys.exit(1)
-    else:
-        configs = all_configs
+    if not runs_dir.exists():
+        print(f"Error: {runs_folder} does not exist")
+        sys.exit(1)
 
-    # ── Log file path ─────────────────────────────────────────────────────────
-    if args.log_file:
-        log_file_path = Path(args.log_file)
-    else:
-        inferred = infer_log_path(args.config_dir, retry=is_retry)
-        if not inferred:
-            print("Could not infer log file path and none provided")
-            sys.exit(1)
-        log_file_path = Path(inferred)
-        print(f"Inferred log file: {log_file_path}")
+    # ── Load ──────────────────────────────────────────────────────────────
+    print(f"Loading runs from: {runs_folder}")
+    all_data = load_run_data(runs_dir)
 
-    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    if not all_data:
+        print("No valid run data found (need config.yaml + metrics_evo.json)")
+        sys.exit(1)
 
-    # ── Code snapshot ─────────────────────────────────────────────────────────
-    commit, branch = get_git_info(repo_root)
+    print(f"Found {len(all_data)} runs")
 
-    if args.snapshot:
-        snapshot_dir = Path(args.snapshot)
-        if not snapshot_dir.exists():
-            print(f"Snapshot directory not found: {snapshot_dir}")
-            sys.exit(1)
-        print(f"\nSnapshot : reusing  {snapshot_dir}  [{branch} @ {commit}]")
-    elif args.no_snapshot:
-        snapshot_dir = None
-        print(f"\nSnapshot : disabled (live workspace)  [{branch} @ {commit}]")
-    else:
-        print(f"\nSnapshotting repo  [{branch} @ {commit}] ...", end=" ", flush=True)
-        snapshot_dir = snapshot_repo(repo_root, log_file_path.parent)
-        print(f"done.\n  -> {snapshot_dir}")
+    # ── Rectangularity: find largest usable sub-grid ─────────────────────
+    try:
+        filtered, T_vals, alpha_vals, nsteps_vals = check_rectangular(all_data)
+    except AssertionError as e:
+        print(f"\nAborting: {e}")
+        sys.exit(1)
 
-    configs = sort_configs_by_difficulty(configs)
+    table = build_table(filtered)
 
-    print(f"\nConfigs to run : {len(configs)}")
-    print(f"Device         : {args.device or 'auto-detect'}")
+    # ── Collect metrics ───────────────────────────────────────────────────
+    all_metrics = sorted({k for d in filtered for k in d["best_metrics"]})
+    print(f"Metrics   : {all_metrics}")
 
-    start_time  = datetime.now()
-    sweep_start = time.time()
+    # ── WandB init ────────────────────────────────────────────────────────
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    wandb.init(
+        project=project_name,
+        name=f"surface_analysis_{timestamp}",
+        job_type="surface_analysis",
+        config={
+            "runs_folder":   runs_folder,
+            "n_runs_total":  len(all_data),
+            "n_runs_used":   len(filtered),
+            "T_values":      T_vals,
+            "alpha_values":  alpha_vals,
+            "nsteps_values": nsteps_vals,
+            "metrics":       all_metrics,
+        },
+    )
 
-    failed           = []
-    succeeded        = []
-    config_durations = []
+    # ── Per-metric plots ──────────────────────────────────────────────────
+    for metric in all_metrics:
+        print(f"  Plotting: {metric}")
+        plot_heatmaps(metric, table, T_vals, alpha_vals, nsteps_vals)
+        plot_metric_vs_T(metric, table, T_vals, alpha_vals, nsteps_vals)
+        plot_metric_vs_nsteps(metric, table, T_vals, alpha_vals, nsteps_vals)
 
-    # ── Log header ────────────────────────────────────────────────────────────
-    retry_note    = f" | Retry of: {args.retry_failed}" if is_retry else ""
-    snapshot_note = f" | Snapshot: {snapshot_dir}" if snapshot_dir else " | Snapshot: disabled"
-    with open(log_file_path, "a") as f:
-        f.write(f"\n{'='*80}\n")
-        f.write(
-            f"SWEEP STARTED: {start_time.strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"Device: {args.device} | Configs: {len(configs)}{retry_note}\n"
-        )
-        f.write(f"Git: {branch} @ {commit}{snapshot_note}\n")
-        f.write(f"{'='*80}\n")
+    # ── Sensitivity (one plot, all metrics) ───────────────────────────────
+    print("  Plotting: sensitivity")
+    plot_sensitivity(all_metrics, table, T_vals, alpha_vals, nsteps_vals)
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
-    for i, config_path in enumerate(configs):
-        print(f"\n[{i+1}/{len(configs)}]")
-
-        if config_durations:
-            avg_time = timedelta(seconds=sum(config_durations) / len(config_durations))
-            elapsed  = timedelta(seconds=time.time() - sweep_start)
-            print(format_eta_info(i, len(configs), avg_time, elapsed))
-            print()
-
-        returncode, duration = run_config_in_docker(
-            config_path, args.device, args.compose_file, snapshot_dir
-        )
-        config_durations.append(duration)
-
-        timestamp    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        duration_str = format_timedelta(timedelta(seconds=duration))
-
-        if returncode != 0:
-            print(f"FAILED: {config_path.name} (took {duration_str})")
-            failed.append(config_path.name)
-            with open(log_file_path, "a") as f:
-                f.write(f"[{timestamp}] FAILED: {config_path.name} (duration: {duration_str})\n")
-        else:
-            print(f"SUCCESS: {config_path.name} (took {duration_str})")
-            succeeded.append(config_path.name)
-            with open(log_file_path, "a") as f:
-                f.write(f"[{timestamp}] SUCCESS: {config_path.name} (duration: {duration_str})\n")
-
-    # ── Summary ───────────────────────────────────────────────────────────────
-    end_time       = datetime.now()
-    total_duration = end_time - start_time
-
-    avg_duration = min_duration = max_duration = None
-    if config_durations:
-        avg_duration = timedelta(seconds=sum(config_durations) / len(config_durations))
-        min_duration = timedelta(seconds=min(config_durations))
-        max_duration = timedelta(seconds=max(config_durations))
-
-    print(f"\n{'='*80}")
-    print(f"SWEEP SUMMARY")
-    print(f"{'='*80}")
-    print(f"Total duration : {format_timedelta(total_duration)}")
-    print(f"Total configs  : {len(configs)}")
-    print(f"Succeeded      : {len(succeeded)}")
-    print(f"Failed         : {len(failed)}")
-
-    if avg_duration is not None:
-        print(f"\nTiming Statistics:")
-        print(f"  Average time per config : {format_timedelta(avg_duration)}")
-        print(f"  Fastest config          : {format_timedelta(min_duration)}")
-        print(f"  Slowest config          : {format_timedelta(max_duration)}")
-
-    if succeeded:
-        print(f"\nSuccessful configs:")
-        for name in succeeded:
-            print(f"  v {name}")
-
-    if failed:
-        print(f"\nFailed configs:")
-        for name in failed:
-            print(f"  x {name}")
-
-    print(f"{'='*80}")
-
-    with open(log_file_path, "a") as f:
-        f.write(
-            f"SWEEP ENDED: {end_time.strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"Duration: {total_duration} | Success: {len(succeeded)}/{len(configs)}\n"
-        )
-        if avg_duration is not None:
-            f.write(
-                f"Average time per config: {format_timedelta(avg_duration)} | "
-                f"Min: {format_timedelta(min_duration)} | Max: {format_timedelta(max_duration)}\n"
-            )
-
-    # ── Write failed list ─────────────────────────────────────────────────────
-    if failed:
-        failed_list_path = write_failed_list(failed, log_file_path)
-        print(f"\nFailed list written to: {failed_list_path}")
-        hint = (f"python3 utils/docker_sweep.py {args.config_dir} "
-                f"--retry-failed {failed_list_path}")
-        if snapshot_dir:
-            hint += f" --snapshot {snapshot_dir}"
-        if args.device:
-            hint += f" --device {args.device}"
-        print(f"To retry:  {hint}")
-
-    if snapshot_dir:
-        print(f"\nSnapshot at: {snapshot_dir}")
-
-    sys.exit(1 if failed else 0)
+    wandb.finish()
+    print("Surface analysis complete!")
 
 
 if __name__ == "__main__":

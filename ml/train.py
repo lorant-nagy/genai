@@ -11,6 +11,7 @@ import sys
 sys.path.append(os.path.abspath(".."))
 
 import torch
+from copy import deepcopy
 from torch.utils.data import DataLoader
 torch.set_default_dtype(torch.float32)
 
@@ -131,6 +132,11 @@ try:
     model = model.to(DEVICE)
     wandb.watch(model, log="all", log_freq=100)
 
+    # ── EMA shadow model ──────────────────────────────────────────────────────
+    EMA_DECAY = 0.999
+    ema_model = deepcopy(model)
+    ema_model.eval()   # always in eval mode, never receives gradients
+
     optimizer_name = config.train.optimizer_cls
     optimizer_parameters = config.train.optimizer_params
     optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **optimizer_parameters.to_dict())
@@ -157,11 +163,6 @@ try:
     stationary_sampler = StationarySampler(config, device=DEVICE)
 
     EVAL_SEED = int(getattr(config.eval, "seed", 0))  # if not in config, defaults to 0
-
-    x0_eval = stationary_sampler(
-        (config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W),
-        seed=EVAL_SEED
-    )
 
     BENCHMARK_METRICS = ["w1"]
 
@@ -210,6 +211,11 @@ try:
             optimizer.step()
             optimizer.zero_grad()
 
+            # ── EMA update ────────────────────────────────────────────────
+            with torch.no_grad():
+                for p_ema, p in zip(ema_model.parameters(), model.parameters()):
+                    p_ema.mul_(EMA_DECAY).add_(p, alpha=1.0 - EMA_DECAY)
+
             if backward_cntr % log_backward_freq != 0:
                 continue
 
@@ -239,86 +245,105 @@ try:
 
             model.eval()
             CHW = (dataset.C, dataset.H, dataset.W)
-            reverse_sde = make_reverse(proc, model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
+            reverse_sde = make_reverse(proc, ema_model, config.corruption.process_params.T, **config.reverse_params.to_dict(), CHW=CHW)
             backward_solver = SDESolver(reverse_sde, integrator)
 
-            # ── Chunked reverse simulation ─────────────────────────────────
-            # Run the reverse SDE in chunks to avoid OOM in the attention
-            # layer (which is quadratic in batch size).  NaN/Inf diagnostics
-            # are accumulated across chunks so the logged percentages are
-            # identical to what a single-batch run would produce.
+            # ── Chunked + multi-seed reverse simulation ───────────────────
+            # Each seed draws a fresh x0 from the stationary distribution and
+            # runs the full chunked reverse SDE.  W1 is computed on the pooled
+            # generated samples (n_metric_samples × W1_N_SEEDS), reducing
+            # variance.  NaN/corrupt stats are averaged across seeds.
             EVAL_CHUNK = 256
-
-            gen_norm_chunks        = []
-            corrupt_img_flags      = []   # bool per image: has at least one bad pixel
-            corrupt_px_sums        = []   # bad-pixel fraction per corrupted image
-            first_appearance_list  = []   # first-bad-step per pixel, flattened
+            W1_N_SEEDS = 3
 
             n_steps_eval = config.corruption.corruptor_params.n_steps
 
+            all_gen_true         = []
+            per_seed_corrupt_img = []
+            per_seed_corrupt_px  = []
+            per_seed_first_step  = []
+            per_seed_trash_pct   = []
+
             with torch.no_grad():
-                for chunk in x0_eval.split(EVAL_CHUNK):
-                    t_grid, X_chunk = backward_solver.simulate(
-                        chunk,
-                        n_steps=n_steps_eval,
-                        seed=EVAL_SEED,
+                for seed_offset in range(W1_N_SEEDS):
+                    seed = EVAL_SEED + seed_offset
+
+                    x0_seed = stationary_sampler(
+                        (config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W),
+                        seed=seed,
                     )
-                    total_steps = len(X_chunk)
-                    final        = X_chunk[-1].detach()          # (chunk, C, H, W)
 
-                    # ── NaN first-appearance tracking ──────────────────────
-                    first_app = torch.full_like(final, total_steps, dtype=torch.float32)
-                    for step_idx, X_t in enumerate(X_chunk):
-                        bad       = torch.isnan(X_t) | torch.isinf(X_t)
-                        newly_bad = bad & (first_app == total_steps)
-                        first_app[newly_bad] = step_idx
+                    gen_norm_chunks       = []
+                    corrupt_img_flags     = []
+                    corrupt_px_sums       = []
+                    first_appearance_list = []
 
-                    affected = first_app < total_steps
-                    if affected.any():
-                        first_appearance_list.append(first_app[affected])
+                    for chunk in x0_seed.split(EVAL_CHUNK):
+                        t_grid, X_chunk = backward_solver.simulate(
+                            chunk,
+                            n_steps=n_steps_eval,
+                            seed=seed,
+                        )
+                        total_steps = len(X_chunk)
+                        final       = X_chunk[-1].detach()
 
-                    # ── Per-image / per-pixel corrupt stats ────────────────
-                    nan_mask   = torch.isnan(final) | torch.isinf(final)
-                    per_img    = nan_mask.view(final.shape[0], -1)   # (chunk, C*H*W)
-                    img_flags  = per_img.any(dim=1)                  # (chunk,) bool
-                    corrupt_img_flags.append(img_flags)
+                        # ── NaN first-appearance tracking ──────────────
+                        first_app = torch.full_like(final, total_steps, dtype=torch.float32)
+                        for step_idx, X_t in enumerate(X_chunk):
+                            bad       = torch.isnan(X_t) | torch.isinf(X_t)
+                            newly_bad = bad & (first_app == total_steps)
+                            first_app[newly_bad] = step_idx
 
-                    bad_imgs = per_img[img_flags]
-                    if bad_imgs.shape[0] > 0:
-                        corrupt_px_sums.append(bad_imgs.float().mean(dim=1))  # per corrupted image
+                        affected = first_app < total_steps
+                        if affected.any():
+                            first_appearance_list.append(first_app[affected])
 
-                    gen_norm_chunks.append(final)
+                        nan_mask  = torch.isnan(final) | torch.isinf(final)
+                        per_img   = nan_mask.view(final.shape[0], -1)
+                        img_flags = per_img.any(dim=1)
+                        corrupt_img_flags.append(img_flags)
 
-            # ── Reassemble ────────────────────────────────────────────────
-            gen_norm  = torch.cat(gen_norm_chunks, dim=0)           # (N, C, H, W)
-            gen_true  = normalizer.denormalize(gen_norm).clamp(0, 1)
+                        bad_imgs = per_img[img_flags]
+                        if bad_imgs.shape[0] > 0:
+                            corrupt_px_sums.append(bad_imgs.float().mean(dim=1))
 
-            # ── Filter corrupt images before metric computation ───────────
-            gen_true_clean, trash_pct = filter_corrupt_images(gen_true, threshold=0.10)
-            metrics_evo['trash%'].append(trash_pct)
+                        gen_norm_chunks.append(final)
 
-            # ── Aggregate NaN stats ───────────────────────────────────────
-            all_flags       = torch.cat(corrupt_img_flags)          # (N,) bool
-            corrupt_img_pct = all_flags.float().mean().item() * 100
+                    # ── Reassemble this seed ────────────────────────────
+                    gen_norm = torch.cat(gen_norm_chunks, dim=0)
+                    gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
+                    gen_true_clean, trash_pct = filter_corrupt_images(gen_true, threshold=0.10)
+                    all_gen_true.append(gen_true_clean)
+                    per_seed_trash_pct.append(trash_pct)
 
-            if corrupt_px_sums:
-                corrupt_px_pct = torch.cat(corrupt_px_sums).mean().item() * 100
-            else:
-                corrupt_px_pct = 0.0
+                    all_flags = torch.cat(corrupt_img_flags)
+                    per_seed_corrupt_img.append(all_flags.float().mean().item() * 100)
 
-            if first_appearance_list:
-                avg_first_appearance = torch.cat(first_appearance_list).mean().item()
-            else:
-                avg_first_appearance = total_steps
+                    if corrupt_px_sums:
+                        per_seed_corrupt_px.append(torch.cat(corrupt_px_sums).mean().item() * 100)
+                    else:
+                        per_seed_corrupt_px.append(0.0)
+
+                    if first_appearance_list:
+                        per_seed_first_step.append(torch.cat(first_appearance_list).mean().item())
+                    else:
+                        per_seed_first_step.append(float(total_steps))
+
+            # ── Pool across seeds and compute metrics ─────────────────────
+            gen_true_pooled      = torch.cat(all_gen_true, dim=0)
+            corrupt_img_pct      = float(np.mean(per_seed_corrupt_img))
+            corrupt_px_pct       = float(np.mean(per_seed_corrupt_px))
+            avg_first_appearance = float(np.mean(per_seed_first_step))
+            metrics_evo['trash%'].append(float(np.mean(per_seed_trash_pct)))
 
             external_dict = {
-                "corrupt_img%": corrupt_img_pct,
-                "corrupt_px%":  corrupt_px_pct,
+                "corrupt_img%":       corrupt_img_pct,
+                "corrupt_px%":        corrupt_px_pct,
                 "first_corrupt_step": avg_first_appearance,
             }
             wandb.log(external_dict)
 
-            metrics_results = {"w1": w1_evaluator.compute(gen_true_clean)}
+            metrics_results = {"w1": w1_evaluator.compute(gen_true_pooled)}
             fill_metrics_results(metrics_evo, metrics_results)
 
             sample_grid_matplotlib = generate_samples_matplotlib(
@@ -341,7 +366,7 @@ try:
 
             for metric in BENCHMARK_METRICS:
                 if metric in metrics_evo and len(metrics_evo[metric]) > 0:
-                    maybe_update_best(metric, metrics_evo[metric][-1], backward_cntr, best_models, model)
+                    maybe_update_best(metric, metrics_evo[metric][-1], backward_cntr, best_models, ema_model)
 
             log_wandb_metrics(metrics_evo)
 
@@ -353,7 +378,7 @@ try:
     log_wandb_best(best_models, config)
 
     wandb_log_best_and_plot(
-        model=model,
+        model=ema_model,
         proc=proc,
         config=config,
         integrator=integrator,

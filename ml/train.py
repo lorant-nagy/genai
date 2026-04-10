@@ -12,6 +12,7 @@ sys.path.append(os.path.abspath(".."))
 
 import torch
 from copy import deepcopy
+import time
 from torch.utils.data import DataLoader
 torch.set_default_dtype(torch.float32)
 
@@ -194,6 +195,7 @@ try:
     epoch_true = 0
     print(f"[bold blue]Evals per epoch:[/] [yellow]{config.eval.evals_per_epoch}[/] → log_backward_freq: {log_backward_freq}")
     print(f"[bold blue]Eval from epoch:[/] [yellow]{eval_from}[/]")
+    t_train_start = time.time()
     # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
     for epoch in range(config.train.n_epochs):
         epoch_true += 1
@@ -220,6 +222,7 @@ try:
                 continue
 
             # # # # # # # # E V A L  B L O C K # # # # # # # # # # # # # # #
+            t_eval_start = time.time()
 
             avg_loss = loss_sum_interval / log_backward_freq
             loss_sum_interval = 0.0
@@ -241,6 +244,7 @@ try:
                 log_wandb_metrics(metrics_evo)
                 line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
                 print(line)
+                t_train_start = time.time()
                 continue
 
             model.eval()
@@ -254,7 +258,7 @@ try:
             # generated samples (n_metric_samples × W1_N_SEEDS), reducing
             # variance.  NaN/corrupt stats are averaged across seeds.
             EVAL_CHUNK = 256
-            W1_N_SEEDS = 3
+            W1_N_SEEDS = 1
 
             n_steps_eval = config.corruption.corruptor_params.n_steps
 
@@ -268,10 +272,15 @@ try:
                 for seed_offset in range(W1_N_SEEDS):
                     seed = EVAL_SEED + seed_offset
 
-                    x0_seed = stationary_sampler(
-                        (config.eval.n_metric_samples, dataset.C, dataset.H, dataset.W),
-                        seed=seed,
-                    )
+                    # sample x0 in chunks to avoid OOM in the forward SDE
+                    x0_chunks = []
+                    for i in range(0, config.eval.n_metric_samples, EVAL_CHUNK):
+                        chunk_size = min(EVAL_CHUNK, config.eval.n_metric_samples - i)
+                        x0_chunks.append(stationary_sampler(
+                            (chunk_size, dataset.C, dataset.H, dataset.W),
+                            seed=seed + i,   # offset seed per chunk for diversity
+                        ))
+                    x0_seed = torch.cat(x0_chunks, dim=0)
 
                     gen_norm_chunks       = []
                     corrupt_img_flags     = []
@@ -343,8 +352,13 @@ try:
             }
             wandb.log(external_dict)
 
-            metrics_results = {"w1": w1_evaluator.compute(gen_true_pooled)}
-            fill_metrics_results(metrics_evo, metrics_results)
+            if gen_true_pooled.shape[0] == 0:
+                print("[bold red]All generated images were filtered as corrupt — skipping W1.[/bold red]")
+                metrics_evo['w1'].append(None)
+                metrics_evo['nan'].append("")
+            else:
+                metrics_results = {"w1": w1_evaluator.compute(gen_true_pooled)}
+                fill_metrics_results(metrics_evo, metrics_results)
 
             sample_grid_matplotlib = generate_samples_matplotlib(
                 model=model,
@@ -360,18 +374,27 @@ try:
 
             model.train()
             # # e n d  o f  e v a l  b l o c k # # # # # # #
+            torch.cuda.empty_cache()
 
             if sample_grid_matplotlib is not None:
                 wandb.log({"generated_samples": sample_grid_matplotlib, "backward_step": backward_cntr})
 
             for metric in BENCHMARK_METRICS:
                 if metric in metrics_evo and len(metrics_evo[metric]) > 0:
-                    maybe_update_best(metric, metrics_evo[metric][-1], backward_cntr, best_models, ema_model)
+                    val = metrics_evo[metric][-1]
+                    if val is not None:
+                        maybe_update_best(metric, val, backward_cntr, best_models, ema_model)
 
             log_wandb_metrics(metrics_evo)
 
+            t_eval_end   = time.time()
+            t_eval_s     = t_eval_end - t_eval_start
+            t_train_s    = t_eval_start - t_train_start
+            timing_str   = f"  [train {t_train_s:.0f}s | eval {t_eval_s:.0f}s]"
+            t_train_start = t_eval_end
+
             line = build_line(metrics_evo, print_tab_w, external_dict=external_dict)
-            print(line)
+            print(line + timing_str)
 
     # # # # # # # # B L O C K 4 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 

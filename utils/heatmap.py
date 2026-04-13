@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+flex_heatmap.py  —  Heatmap from the experiment database
+=========================================================
+Reads a DB file produced by run_db.py, plots a heatmap, and uploads
+it to WandB.
+
+USAGE
+-----
+    python -m utils.flex_heatmap <db_path> <project_name>
+
+EXAMPLES
+--------
+    python -m utils.flex_heatmap db/surface.json surface
+"""
+
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.patheffects as pe
+import matplotlib.pyplot as plt
+import numpy as np
+import wandb
+
+try:
+    from utils.run_db import load_db, AXIS_ALIASES
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from utils.run_db import load_db, AXIS_ALIASES
+
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+REDUCE_TAIL = 5          # median of the last N finite values per run
+
+AXIS_X     = "T"
+AXIS_Y     = "alpha"
+AXIS_SLICE = ("n_steps", 250)   # (param, value)  — fixes the third dimension
+VALUE      = "w1"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _reduce(series: list) -> float | None:
+    """Median of the last REDUCE_TAIL finite values. Returns None if none exist."""
+    fin = [v for v in series if isinstance(v, (int, float)) and np.isfinite(v)]
+    return float(np.median(fin[-REDUCE_TAIL:])) if fin else None
+
+
+def _annotate(ax, grid: np.ndarray) -> None:
+    for ri in range(grid.shape[0]):
+        for ci in range(grid.shape[1]):
+            v = grid[ri, ci]
+            if np.isfinite(v):
+                ax.text(ci, ri, f"{v:.4f}",
+                        ha="center", va="center",
+                        fontsize=7, color="white",
+                        path_effects=[pe.withStroke(linewidth=1.5,
+                                                    foreground="black")])
+
+
+def plot(records: list[dict]) -> plt.Figure:
+    slice_param, slice_val = AXIS_SLICE
+
+    filtered = [r for r in records
+                if r["params"].get(slice_param) == slice_val]
+
+    if not filtered:
+        raise ValueError(
+            f"No records with {slice_param}={slice_val}. "
+            f"Available: {sorted({r['params'].get(slice_param) for r in records})}"
+        )
+
+    x_vals = sorted({r["params"][AXIS_X] for r in filtered
+                     if r["params"].get(AXIS_X) is not None})
+    y_vals = sorted({r["params"][AXIS_Y] for r in filtered
+                     if r["params"].get(AXIS_Y) is not None})
+
+    cells: dict[tuple, list[float]] = defaultdict(list)
+    for r in filtered:
+        xv = r["params"].get(AXIS_X)
+        yv = r["params"].get(AXIS_Y)
+        if xv is None or yv is None:
+            continue
+        series = r["metrics"].get(VALUE)
+        if series is None:
+            continue
+        scalar = _reduce(series)
+        if scalar is not None:
+            cells[(xv, yv)].append(scalar)
+
+    n_agg = sum(1 for vs in cells.values() if len(vs) > 1)
+    if n_agg:
+        print(f"  Note: {n_agg} cell(s) had multiple runs — collapsed by min.")
+
+    grid = np.full((len(y_vals), len(x_vals)), np.nan)
+    for yi, y in enumerate(y_vals):
+        for xi, x in enumerate(x_vals):
+            vs = cells.get((x, y))
+            if vs:
+                grid[yi, xi] = min(vs)
+
+    finite = grid[np.isfinite(grid)]
+    vmin = float(finite.min()) if len(finite) else 0.0
+    vmax = float(finite.max()) if len(finite) else 1.0
+
+    fig, ax = plt.subplots(figsize=(max(5, len(x_vals) * 1.4),
+                                    max(4, len(y_vals) * 1.0)))
+    im = ax.imshow(grid, cmap=plt.cm.viridis_r,
+                   vmin=vmin, vmax=vmax,
+                   aspect="auto", origin="lower")
+    _annotate(ax, grid)
+
+    ax.set_xticks(range(len(x_vals)))
+    ax.set_xticklabels([str(v) for v in x_vals], rotation=45, ha="right")
+    ax.set_yticks(range(len(y_vals)))
+    ax.set_yticklabels([str(v) for v in y_vals])
+    ax.set_xlabel(AXIS_X, fontsize=11)
+    ax.set_ylabel(AXIS_Y, fontsize=11)
+    ax.set_title(
+        f"{VALUE.upper()}  —  {AXIS_Y} × {AXIS_X}"
+        f"  |  {slice_param}={slice_val}"
+        f"  |  reduce=median_tail({REDUCE_TAIL})",
+        fontsize=12, fontweight="bold",
+    )
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    return fig
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        print("Usage: python -m utils.flex_heatmap <db_path> <project_name>")
+        print("Example: python -m utils.flex_heatmap db/surface.json surface")
+        sys.exit(1)
+
+    db_path      = Path(sys.argv[1])
+    project_name = sys.argv[2]
+
+    if not db_path.exists():
+        print(f"Error: '{db_path}' does not exist.")
+        sys.exit(1)
+
+    records = load_db(db_path)
+    print(f"Loaded {len(records)} records from {db_path}")
+
+    available = sorted({k for r in records for k in r["metrics"]})
+    if VALUE not in available:
+        print(f"Error: metric '{VALUE}' not found. Available: {available}")
+        sys.exit(1)
+
+    fig = plot(records)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    wandb.init(
+        project=project_name,
+        name=f"flex_heatmap_{AXIS_X}_vs_{AXIS_Y}_{VALUE}_{timestamp}",
+        job_type="flex_heatmap",
+        config={
+            "x": AXIS_X, "y": AXIS_Y,
+            "slice": AXIS_SLICE, "value": VALUE,
+            "reduce_tail": REDUCE_TAIL,
+        },
+    )
+    log_key = f"{VALUE}/heatmap_{AXIS_X}_vs_{AXIS_Y}"
+    wandb.log({log_key: wandb.Image(fig)})
+    print(f"  Logged to WandB: {log_key}")
+    wandb.finish()
+
+    plt.close(fig)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()

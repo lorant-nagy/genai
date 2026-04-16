@@ -163,9 +163,10 @@ try:
     loss_fn = getattr(torch.nn, config.loss.cls)(**config.loss.loss_params.to_dict())
     stationary_sampler = StationarySampler(config, device=DEVICE)
 
-    EVAL_SEED = int(getattr(config.eval, "seed", 0))  # if not in config, defaults to 0
+    EVAL_SEED    = int(getattr(config.eval, "seed", 0))       # if not in config, defaults to 0
+    W1_N_SEEDS   = int(getattr(config.eval, "w1_n_seeds", 1)) # number of independent W1 estimates
 
-    BENCHMARK_METRICS = ["w1"]
+    BENCHMARK_METRICS = ["w1_0"]  # best-model checkpoint tracks seed-0 W1
 
     print("[bold green]---------------------------------------------------------------[/bold green]")
     print(f"[bold green]RUN NAME : ------------------[/][yellow] {petname_str} [/][bold green]------------------[/bold green]")
@@ -181,7 +182,9 @@ try:
     w1_evaluator = W1Evaluator(real_true)
 
     best_models = {key : {'value': float('inf'), 'state_dict': None, 'epoch': 0} for key in BENCHMARK_METRICS}
-    metrics_evo = {key: [] for key in ['epochs', 'loss', 'nan', 'w1', 'trash%']}
+    metrics_evo = {key: [] for key in ['epochs', 'loss', 'nan', 'trash%']}
+    for k in range(W1_N_SEEDS):
+        metrics_evo[f"w1_{k}"] = []
 
     print_tab_w = 16
     header = create_header(metrics_evo, print_tab_w, external = ["corrupt_img%", "corrupt_px%", "first_corrupt_step"])
@@ -233,9 +236,11 @@ try:
 
             if epoch_true < eval_from:
                 # warmup: skip expensive eval, keep list lengths in sync
-                metrics_evo['w1'].append(None)
                 metrics_evo['nan'].append("")
                 metrics_evo['trash%'].append(None)
+                # keep w1_k lists in sync
+                for k in range(W1_N_SEEDS):
+                    metrics_evo[f"w1_{k}"].append(None)
                 external_dict = {
                     "corrupt_img%":      None,
                     "corrupt_px%":       None,
@@ -253,16 +258,15 @@ try:
             backward_solver = SDESolver(reverse_sde, integrator)
 
             # ── Chunked + multi-seed reverse simulation ───────────────────
-            # Each seed draws a fresh x0 from the stationary distribution and
-            # runs the full chunked reverse SDE.  W1 is computed on the pooled
-            # generated samples (n_metric_samples × W1_N_SEEDS), reducing
-            # variance.  NaN/corrupt stats are averaged across seeds.
+            # Each seed generates one independent batch of n_metric_samples
+            # images and computes its own W1 against the fixed real set.
+            # W1_N_SEEDS independent W1 values are collected; mean and std
+            # are logged to WandB.  NaN/corrupt stats are averaged across seeds.
             EVAL_CHUNK = 256
-            W1_N_SEEDS = 1
 
             n_steps_eval = config.corruption.corruptor_params.n_steps
 
-            all_gen_true         = []
+            per_seed_w1          = []
             per_seed_corrupt_img = []
             per_seed_corrupt_px  = []
             per_seed_first_step  = []
@@ -322,8 +326,11 @@ try:
                     gen_norm = torch.cat(gen_norm_chunks, dim=0)
                     gen_true = normalizer.denormalize(gen_norm).clamp(0, 1)
                     gen_true_clean, trash_pct = filter_corrupt_images(gen_true, threshold=0.10)
-                    all_gen_true.append(gen_true_clean)
                     per_seed_trash_pct.append(trash_pct)
+
+                    # ── W1 for this seed ────────────────────────────────
+                    if gen_true_clean.shape[0] > 0:
+                        per_seed_w1.append(w1_evaluator.compute(gen_true_clean))
 
                     all_flags = torch.cat(corrupt_img_flags)
                     per_seed_corrupt_img.append(all_flags.float().mean().item() * 100)
@@ -338,8 +345,7 @@ try:
                     else:
                         per_seed_first_step.append(float(total_steps))
 
-            # ── Pool across seeds and compute metrics ─────────────────────
-            gen_true_pooled      = torch.cat(all_gen_true, dim=0)
+            # ── Aggregate across seeds and compute metrics ────────────────
             corrupt_img_pct      = float(np.mean(per_seed_corrupt_img))
             corrupt_px_pct       = float(np.mean(per_seed_corrupt_px))
             avg_first_appearance = float(np.mean(per_seed_first_step))
@@ -352,13 +358,18 @@ try:
             }
             wandb.log(external_dict)
 
-            if gen_true_pooled.shape[0] == 0:
+            if not per_seed_w1:
                 print("[bold red]All generated images were filtered as corrupt — skipping W1.[/bold red]")
-                metrics_evo['w1'].append(None)
                 metrics_evo['nan'].append("")
+                for k in range(W1_N_SEEDS):
+                    metrics_evo[f"w1_{k}"].append(None)
             else:
-                metrics_results = {"w1": w1_evaluator.compute(gen_true_pooled)}
-                fill_metrics_results(metrics_evo, metrics_results)
+                metrics_evo['nan'].append("")
+                for k, w1_val in enumerate(per_seed_w1):
+                    metrics_evo[f"w1_{k}"].append(w1_val)
+                # pad any seeds that were fully corrupt
+                for k in range(len(per_seed_w1), W1_N_SEEDS):
+                    metrics_evo[f"w1_{k}"].append(None)
 
             sample_grid_matplotlib = generate_samples_matplotlib(
                 model=model,

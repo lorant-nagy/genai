@@ -35,7 +35,11 @@ except ImportError:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-REDUCE_TAIL = 5          # median of the last N finite values per run
+# How many trailing finite values to use.  Set to "all" to use the entire series.
+REDUCE_TAIL = "all"
+
+# Aggregation function applied to the tail: "median" or "min".
+REDUCE_FN   = "min"
 
 AXIS_X     = "T"
 AXIS_Y     = "alpha"
@@ -46,9 +50,26 @@ VALUE      = "w1"
 
 
 def _reduce(series: list) -> float | None:
-    """Median of the last REDUCE_TAIL finite values. Returns None if none exist."""
+    """
+    Collapse a run's metric time-series to a single scalar.
+
+    REDUCE_TAIL selects which values to consider:
+      int   — last N finite values
+      "all" — all finite values in the series
+
+    REDUCE_FN is then applied to that selection:
+      "median" — median
+      "min"    — minimum
+
+    Returns None if there are no finite values.
+    """
     fin = [v for v in series if isinstance(v, (int, float)) and np.isfinite(v)]
-    return float(np.median(fin[-REDUCE_TAIL:])) if fin else None
+    if not fin:
+        return None
+    tail = fin if REDUCE_TAIL == "all" else fin[-REDUCE_TAIL:]
+    if REDUCE_FN == "min":
+        return float(np.min(tail))
+    return float(np.median(tail))
 
 
 def _annotate(ax, grid: np.ndarray) -> None:
@@ -121,10 +142,12 @@ def plot(records: list[dict]) -> plt.Figure:
     ax.set_yticklabels([str(v) for v in y_vals])
     ax.set_xlabel(AXIS_X, fontsize=11)
     ax.set_ylabel(AXIS_Y, fontsize=11)
+    tail_label   = "all" if REDUCE_TAIL == "all" else f"tail({REDUCE_TAIL})"
+    reduce_label = f"{REDUCE_FN}_{tail_label}"
     ax.set_title(
         f"{VALUE.upper()}  —  {AXIS_Y} × {AXIS_X}"
         f"  |  {slice_param}={slice_val}"
-        f"  |  reduce=median_tail({REDUCE_TAIL})",
+        f"  |  reduce={reduce_label}",
         fontsize=12, fontweight="bold",
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -163,6 +186,7 @@ def main() -> None:
         config={
             "x": AXIS_X, "y": AXIS_Y,
             "slice": AXIS_SLICE, "value": VALUE,
+            "reduce_fn":   REDUCE_FN,
             "reduce_tail": REDUCE_TAIL,
         },
     )

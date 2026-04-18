@@ -5,6 +5,8 @@ flex_heatmap.py  —  Heatmap from the experiment database
 Reads a DB file produced by run_db.py, plots a heatmap, and uploads
 it to WandB.
 
+All w1_* metrics are discovered automatically; no VALUE constant needed.
+
 USAGE
 -----
     python -m utils.flex_heatmap <db_path> <project_name>
@@ -14,6 +16,7 @@ EXAMPLES
     python -m utils.flex_heatmap db/surface.json surface
 """
 
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -38,20 +41,22 @@ except ImportError:
 # How many trailing finite values to use.  Set to "all" to use the entire series.
 REDUCE_TAIL = "all"
 
-# Aggregation function applied to the tail: "median" or "min".
+# Aggregation function applied to each w1_k time-series: "median" or "min".
 REDUCE_FN   = "min"
+
+# Aggregation function applied across seeds per cell: "mean", "median", "min".
+SEED_AGG    = "median"
 
 AXIS_X     = "T"
 AXIS_Y     = "alpha"
-AXIS_SLICE = ("n_steps", 250)   # (param, value)  — fixes the third dimension
-VALUE      = "w1"
+AXIS_SLICE = ("n_steps", 100)   # (param, value)  — fixes the third dimension
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def _reduce(series: list) -> float | None:
     """
-    Collapse a run's metric time-series to a single scalar.
+    Collapse a single w1_k time-series to a scalar.
 
     REDUCE_TAIL selects which values to consider:
       int   — last N finite values
@@ -72,6 +77,22 @@ def _reduce(series: list) -> float | None:
     return float(np.median(tail))
 
 
+def _seed_agg(values: list[float]) -> float:
+    """
+    Collapse per-seed scalars for a single cell to one value.
+
+    SEED_AGG controls the method:
+      "mean"   — arithmetic mean  (default)
+      "median" — median
+      "min"    — minimum
+    """
+    if SEED_AGG == "min":
+        return float(np.min(values))
+    if SEED_AGG == "median":
+        return float(np.median(values))
+    return float(np.mean(values))
+
+
 def _annotate(ax, grid: np.ndarray) -> None:
     for ri in range(grid.shape[0]):
         for ci in range(grid.shape[1]):
@@ -84,7 +105,7 @@ def _annotate(ax, grid: np.ndarray) -> None:
                                                     foreground="black")])
 
 
-def plot(records: list[dict]) -> plt.Figure:
+def plot(records: list[dict], w1_keys: list[str]) -> plt.Figure:
     slice_param, slice_val = AXIS_SLICE
 
     filtered = [r for r in records
@@ -107,23 +128,20 @@ def plot(records: list[dict]) -> plt.Figure:
         yv = r["params"].get(AXIS_Y)
         if xv is None or yv is None:
             continue
-        series = r["metrics"].get(VALUE)
-        if series is None:
-            continue
-        scalar = _reduce(series)
-        if scalar is not None:
-            cells[(xv, yv)].append(scalar)
-
-    n_agg = sum(1 for vs in cells.values() if len(vs) > 1)
-    if n_agg:
-        print(f"  Note: {n_agg} cell(s) had multiple runs — collapsed by min.")
+        for key in w1_keys:
+            series = r["metrics"].get(key)
+            if series is None:
+                continue
+            scalar = _reduce(series)
+            if scalar is not None:
+                cells[(xv, yv)].append(scalar)
 
     grid = np.full((len(y_vals), len(x_vals)), np.nan)
     for yi, y in enumerate(y_vals):
         for xi, x in enumerate(x_vals):
             vs = cells.get((x, y))
             if vs:
-                grid[yi, xi] = min(vs)
+                grid[yi, xi] = _seed_agg(vs)
 
     finite = grid[np.isfinite(grid)]
     vmin = float(finite.min()) if len(finite) else 0.0
@@ -142,12 +160,14 @@ def plot(records: list[dict]) -> plt.Figure:
     ax.set_yticklabels([str(v) for v in y_vals])
     ax.set_xlabel(AXIS_X, fontsize=11)
     ax.set_ylabel(AXIS_Y, fontsize=11)
+
+    n_seeds      = len(w1_keys)
     tail_label   = "all" if REDUCE_TAIL == "all" else f"tail({REDUCE_TAIL})"
     reduce_label = f"{REDUCE_FN}_{tail_label}"
     ax.set_title(
-        f"{VALUE.upper()}  —  {AXIS_Y} × {AXIS_X}"
+        f"W1 ({n_seeds} seeds, seed_agg={SEED_AGG})  —  {AXIS_Y} × {AXIS_X}"
         f"  |  {slice_param}={slice_val}"
-        f"  |  reduce={reduce_label}",
+        f"  |  series_reduce={reduce_label}",
         fontsize=12, fontweight="bold",
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -172,25 +192,35 @@ def main() -> None:
     print(f"Loaded {len(records)} records from {db_path}")
 
     available = sorted({k for r in records for k in r["metrics"]})
-    if VALUE not in available:
-        print(f"Error: metric '{VALUE}' not found. Available: {available}")
-        sys.exit(1)
 
-    fig = plot(records)
+    w1_keys = sorted(
+        (k for k in available if re.fullmatch(r"w1_\d+", k)),
+        key=lambda k: int(k.split("_")[1]),
+    )
+    if not w1_keys:
+        print(f"Error: no w1_* metrics found. Available: {available}")
+        sys.exit(1)
+    print(f"  Found {len(w1_keys)} w1 seed(s): {w1_keys}")
+
+    fig = plot(records, w1_keys)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    n_seeds   = len(w1_keys)
     wandb.init(
         project=project_name,
-        name=f"flex_heatmap_{AXIS_X}_vs_{AXIS_Y}_{VALUE}_{timestamp}",
+        name=f"flex_heatmap_{AXIS_X}_vs_{AXIS_Y}_w1x{n_seeds}_{timestamp}",
         job_type="flex_heatmap",
         config={
-            "x": AXIS_X, "y": AXIS_Y,
-            "slice": AXIS_SLICE, "value": VALUE,
+            "x":           AXIS_X,
+            "y":           AXIS_Y,
+            "slice":       AXIS_SLICE,
+            "w1_keys":     w1_keys,
+            "seed_agg":    SEED_AGG,
             "reduce_fn":   REDUCE_FN,
             "reduce_tail": REDUCE_TAIL,
         },
     )
-    log_key = f"{VALUE}/heatmap_{AXIS_X}_vs_{AXIS_Y}"
+    log_key = f"w1/heatmap_{AXIS_X}_vs_{AXIS_Y}"
     wandb.log({log_key: wandb.Image(fig)})
     print(f"  Logged to WandB: {log_key}")
     wandb.finish()

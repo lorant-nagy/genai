@@ -29,6 +29,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import wandb
 
+import argparse
+
 try:
     from utils.run_db import load_db, AXIS_ALIASES
 except ImportError:
@@ -36,7 +38,9 @@ except ImportError:
     from utils.run_db import load_db, AXIS_ALIASES
 
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+
+
+""" # ── Configuration ─────────────────────────────────────────────────────────────
 
 # How many trailing finite values to use.  Set to "all" to use the entire series.
 REDUCE_TAIL = "all"
@@ -45,16 +49,16 @@ REDUCE_TAIL = "all"
 REDUCE_FN   = "min"
 
 # Aggregation function applied across seeds per cell: "mean", "median", "min".
-SEED_AGG    = "median"
+SEED_AGG    = "mean"
 
 AXIS_X     = "T"
 AXIS_Y     = "alpha"
 AXIS_SLICE = ("n_steps", 100)   # (param, value)  — fixes the third dimension
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── """
 
 
-def _reduce(series: list) -> float | None:
+def _reduce(series, REDUCE_TAIL, REDUCE_FN) -> float | None:
     """
     Collapse a single w1_k time-series to a scalar.
 
@@ -77,7 +81,7 @@ def _reduce(series: list) -> float | None:
     return float(np.median(tail))
 
 
-def _seed_agg(values: list[float]) -> float:
+def _seed_agg(values, SEED_AGG) -> float:
     """
     Collapse per-seed scalars for a single cell to one value.
 
@@ -105,7 +109,7 @@ def _annotate(ax, grid: np.ndarray) -> None:
                                                     foreground="black")])
 
 
-def plot(records: list[dict], w1_keys: list[str]) -> plt.Figure:
+def plot(records, w1_keys, AXIS_SLICE, AXIS_X, AXIS_Y, REDUCE_TAIL, REDUCE_FN, SEED_AGG, REMARK) -> plt.Figure:
     slice_param, slice_val = AXIS_SLICE
 
     filtered = [r for r in records
@@ -132,7 +136,7 @@ def plot(records: list[dict], w1_keys: list[str]) -> plt.Figure:
             series = r["metrics"].get(key)
             if series is None:
                 continue
-            scalar = _reduce(series)
+            scalar = _reduce(series, REDUCE_TAIL, REDUCE_FN)
             if scalar is not None:
                 cells[(xv, yv)].append(scalar)
 
@@ -141,7 +145,7 @@ def plot(records: list[dict], w1_keys: list[str]) -> plt.Figure:
         for xi, x in enumerate(x_vals):
             vs = cells.get((x, y))
             if vs:
-                grid[yi, xi] = _seed_agg(vs)
+                grid[yi, xi] = _seed_agg(vs, SEED_AGG)
 
     finite = grid[np.isfinite(grid)]
     vmin = float(finite.min()) if len(finite) else 0.0
@@ -172,24 +176,42 @@ def plot(records: list[dict], w1_keys: list[str]) -> plt.Figure:
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     plt.tight_layout()
+
+    if REMARK:
+        fig.text(0.5, 0.01, f"Remark: {REMARK}",
+                 ha="center", va="bottom", fontsize=9,
+                 style="italic", color="#444444",
+                 wrap=True)
+        plt.tight_layout(rect=[0, 0.06, 1, 1])
+    else:
+        plt.tight_layout()
+
     return fig
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        print("Usage: python -m utils.flex_heatmap <db_path> <project_name>")
-        print("Example: python -m utils.flex_heatmap db/surface.json surface")
-        sys.exit(1)
 
-    db_path      = Path(sys.argv[1])
-    project_name = sys.argv[2]
+    parser = argparse.ArgumentParser(
+        description = "parse arguments for heatmap generator"
+    )
 
-    if not db_path.exists():
-        print(f"Error: '{db_path}' does not exist.")
-        sys.exit(1)
+    parser.add_argument("db_path")
+    parser.add_argument("project_name")
+    parser.add_argument("--reduce-tail", dest="REDUCE_TAIL", default="all")
+    parser.add_argument("--reduce-fn", dest = "REDUCE_FN", default="min")
+    parser.add_argument("--seed-agg", dest="SEED_AGG", default="mean")
+    parser.add_argument("--axis-x", dest="AXIS_X")
+    parser.add_argument("--axis-y", dest="AXIS_Y")
+    parser.add_argument("--axis-slice-key", dest="AXIS_SLICE_KEY")
+    parser.add_argument("--axis-slice-value", dest="AXIS_SLICE_VALUE")
+    parser.add_argument("--remark", dest="remark", default=None)
 
-    records = load_db(db_path)
-    print(f"Loaded {len(records)} records from {db_path}")
+    args = parser.parse_args()
+
+    args.AXIS_SLICE = (args.AXIS_SLICE_KEY, int(args.AXIS_SLICE_VALUE))
+
+    records = load_db(args.db_path)
+    print(f"Loaded {len(records)} records from {args.db_path}")
 
     available = sorted({k for r in records for k in r["metrics"]})
 
@@ -202,25 +224,25 @@ def main() -> None:
         sys.exit(1)
     print(f"  Found {len(w1_keys)} w1 seed(s): {w1_keys}")
 
-    fig = plot(records, w1_keys)
+    fig = plot(records, w1_keys, args.AXIS_SLICE, args.AXIS_X, args.AXIS_Y, args.REDUCE_TAIL, args.REDUCE_FN, args.SEED_AGG, args.remark)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     n_seeds   = len(w1_keys)
     wandb.init(
-        project=project_name,
-        name=f"flex_heatmap_{AXIS_X}_vs_{AXIS_Y}_w1x{n_seeds}_{timestamp}",
+        project=args.project_name,
+        name=f"flex_heatmap_{args.AXIS_X}_vs_{args.AXIS_Y}_w1x{n_seeds}_{timestamp}",
         job_type="flex_heatmap",
         config={
-            "x":           AXIS_X,
-            "y":           AXIS_Y,
-            "slice":       AXIS_SLICE,
+            "x":           args.AXIS_X,
+            "y":           args.AXIS_Y,
+            "slice":       args.AXIS_SLICE,
             "w1_keys":     w1_keys,
-            "seed_agg":    SEED_AGG,
-            "reduce_fn":   REDUCE_FN,
-            "reduce_tail": REDUCE_TAIL,
+            "seed_agg":    args.SEED_AGG,
+            "reduce_fn":   args.REDUCE_FN,
+            "reduce_tail": args.REDUCE_TAIL,
         },
     )
-    log_key = f"w1/heatmap_{AXIS_X}_vs_{AXIS_Y}"
+    log_key = f"w1/heatmap_{args.AXIS_X}_vs_{args.AXIS_Y}"
     wandb.log({log_key: wandb.Image(fig)})
     print(f"  Logged to WandB: {log_key}")
     wandb.finish()

@@ -17,11 +17,11 @@ COPY requirements.txt /workspace/requirements.txt
 RUN python -m pip install --upgrade pip && \
     pip install -r /workspace/requirements.txt
 
-RUN python - <<'PY'
-from torchvision.models import inception_v3, Inception_V3_Weights
-m = inception_v3(weights=Inception_V3_Weights.DEFAULT)
-print("Cached InceptionV3 weights.")
-PY
+#RUN python - <<'PY'
+# from torchvision.models import inception_v3, Inception_V3_Weights
+# m = inception_v3(weights=Inception_V3_Weights.DEFAULT)
+# print("Cached InceptionV3 weights.")
+#PY
 
 COPY docker/entry.sh /entry.sh
 RUN chmod +x /entry.sh
